@@ -9,6 +9,7 @@ const mockContentService = {
 
 const mockDriveApp = {
   getFolderById: vi.fn(),
+  getFileById: vi.fn(),
 };
 
 const mockDocumentApp = {
@@ -94,13 +95,9 @@ describe('Code.js', () => {
     });
 
     it('should return an error when the provided ID does not exist in the folder', () => {
-      const mockIterator = {
-        hasNext: () => false,
-      };
-      const mockFolder = {
-        getFilesByType: vi.fn().mockReturnValue(mockIterator),
-      };
-      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      mockDriveApp.getFileById.mockImplementation(() => {
+        throw new Error('Not found');
+      });
 
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
@@ -113,16 +110,16 @@ describe('Code.js', () => {
 
     it('should return document title and markdown when a valid ID is provided', () => {
       const fileId = 'valid-id';
-      const mockFiles = [{ getId: () => fileId, getName: () => 'Valid Doc' }];
-      let index = 0;
-      const mockIterator = {
-        hasNext: () => index < mockFiles.length,
-        next: () => mockFiles[index++],
+      const mockParentsIterator = {
+        hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
       };
-      const mockFolder = {
-        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      const mockFile = {
+        getMimeType: () => mockMimeType.GOOGLE_DOCS,
+        getParents: () => mockParentsIterator,
+        getName: () => 'Valid Doc',
       };
-      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      mockDriveApp.getFileById.mockReturnValue(mockFile);
 
       const mockBody = {
         getNumChildren: () => 1,
@@ -161,23 +158,38 @@ describe('Code.js', () => {
   });
 
   describe('Folder Helpers', () => {
-    describe('existsInFolder_', () => {
-      it('should return false if the file is not found after iterating', () => {
-        const mockFiles = [
-          { getId: () => 'other1' },
-          { getId: () => 'other2' },
-        ];
-        let index = 0;
-        const mockIterator = {
-          hasNext: () => index < mockFiles.length,
-          next: () => mockFiles[index++],
+    describe('getDocInfoInFolder_', () => {
+      it('should return {exists: false} if the file is not in the folder', () => {
+        const mockParentsIterator = {
+          hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+          next: vi.fn().mockReturnValue({ getId: () => 'otherFolder' }),
         };
-        const mockFolder = {
-          getFilesByType: vi.fn().mockReturnValue(mockIterator),
+        const mockFile = {
+          getMimeType: () => mockMimeType.GOOGLE_DOCS,
+          getParents: () => mockParentsIterator,
         };
-        mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+        mockDriveApp.getFileById.mockReturnValue(mockFile);
 
-        expect(Code.existsInFolder_('folderId', 'missingId')).toBe(false);
+        const result = Code.getDocInfoInFolder_('folderId', 'fileId');
+        expect(result.exists).toBe(false);
+      });
+
+      it('should return {exists: false} if mimeType is not GOOGLE_DOCS', () => {
+        const mockFile = {
+          getMimeType: () => 'otherMimeType',
+        };
+        mockDriveApp.getFileById.mockReturnValue(mockFile);
+
+        const result = Code.getDocInfoInFolder_('folderId', 'fileId');
+        expect(result.exists).toBe(false);
+      });
+
+      it('should return {exists: false} and handle error when getFileById fails', () => {
+        mockDriveApp.getFileById.mockImplementation(() => {
+          throw new Error('Access denied');
+        });
+        const result = Code.getDocInfoInFolder_('folderId', 'fileId');
+        expect(result.exists).toBe(false);
       });
     });
   });
