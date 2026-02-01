@@ -1,6 +1,6 @@
-const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
 
-function doGet(e) {
+export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
 
   // id未指定：フォルダ内DocsのID一覧（名前順）をJSONで返す
@@ -30,7 +30,7 @@ function doGet(e) {
 /** -----------------------------
  *  List: Docs IDs (sorted)
  *  ----------------------------- */
-function listDocIdsSortedByName_(folderId) {
+export function listDocIdsSortedByName_(folderId) {
   const folder = DriveApp.getFolderById(folderId);
   const files = folder.getFilesByType(MimeType.GOOGLE_DOCS);
 
@@ -44,7 +44,7 @@ function listDocIdsSortedByName_(folderId) {
   return docs.map(d => d.id);
 }
 
-function existsInFolder_(folderId, fileId) {
+export function existsInFolder_(folderId, fileId) {
   const folder = DriveApp.getFolderById(folderId);
   const files = folder.getFilesByType(MimeType.GOOGLE_DOCS);
 
@@ -58,7 +58,7 @@ function existsInFolder_(folderId, fileId) {
 /** -----------------------------
  *  Markdown conversion (best-effort)
  *  ----------------------------- */
-function docBodyToMarkdown_(doc) {
+export function docBodyToMarkdown_(doc) {
   const body = doc.getBody();
   const out = [];
 
@@ -74,7 +74,7 @@ function docBodyToMarkdown_(doc) {
     .trim() + '\n';
 }
 
-function elementToMarkdown_(el) {
+export function elementToMarkdown_(el) {
   const t = el.getType();
 
   if (t === DocumentApp.ElementType.PARAGRAPH) {
@@ -102,7 +102,7 @@ function elementToMarkdown_(el) {
   return '';
 }
 
-function paragraphToMarkdown_(p) {
+export function paragraphToMarkdown_(p) {
   const text = paragraphTextWithInlineStyles_(p).trim();
   if (!text) return '';
 
@@ -116,7 +116,7 @@ function paragraphToMarkdown_(p) {
   return `${text}\n`;
 }
 
-function listItemToMarkdown_(li) {
+export function listItemToMarkdown_(li) {
   const text = paragraphTextWithInlineStyles_(li).trim();
   if (!text) return '';
 
@@ -131,7 +131,7 @@ function listItemToMarkdown_(li) {
   return `${indent}${bullet} ${text}\n`;
 }
 
-function tableToMarkdown_(table) {
+export function tableToMarkdown_(table) {
   // 簡易：1行目をヘッダとしてMarkdown表にする（ヘッダが不要ならここ変えてOK）
   const rows = table.getNumRows();
   if (rows === 0) return '';
@@ -169,7 +169,7 @@ function tableToMarkdown_(table) {
   return md;
 }
 
-function headingToPrefix_(heading) {
+export function headingToPrefix_(heading) {
   switch (heading) {
     case DocumentApp.ParagraphHeading.HEADING1: return '#';
     case DocumentApp.ParagraphHeading.HEADING2: return '##';
@@ -181,7 +181,7 @@ function headingToPrefix_(heading) {
   }
 }
 
-function isOrderedGlyph_(glyphType) {
+export function isOrderedGlyph_(glyphType) {
   // orderedっぽいものを広めに拾う（Docsの環境/言語で揺れるので防御的に）
   const s = String(glyphType);
   return /NUMBER|LATIN|ROMAN|ALPHA/i.test(s);
@@ -194,7 +194,7 @@ function isOrderedGlyph_(glyphType) {
  * - [text](url)
  * それ以外は素直にテキスト
  */
-function paragraphTextWithInlineStyles_(p) {
+export function paragraphTextWithInlineStyles_(p) {
   // Paragraph/ListItem は Text を子に持つことが多い
   // getText() だけだとスタイルが落ちるので、Text要素を追って変換
   let out = '';
@@ -250,7 +250,7 @@ function paragraphTextWithInlineStyles_(p) {
   return out;
 }
 
-function sameTextAttrs_(a, b) {
+export function sameTextAttrs_(a, b) {
   // 比較対象を絞る（必要なものだけ）
   return (
     a[DocumentApp.Attribute.BOLD] === b[DocumentApp.Attribute.BOLD] &&
@@ -259,7 +259,7 @@ function sameTextAttrs_(a, b) {
   );
 }
 
-function escapeMdInline_(s) {
+export function escapeMdInline_(s) {
   // 最低限：` * _ [ ] をエスケープ（リンク部分は [] に入るので過剰エスケープ注意）
   // ここは“強すぎない”程度にしています
   return s
@@ -267,7 +267,7 @@ function escapeMdInline_(s) {
     .replace(/`/g, '\\`');
 }
 
-function escapeMdTable_(s) {
+export function escapeMdTable_(s) {
   // Markdown表の区切り文字を壊さないように
   return s.replace(/\|/g, '\\|');
 }
@@ -275,12 +275,12 @@ function escapeMdTable_(s) {
 /** -----------------------------
  *  JSON helpers
  *  ----------------------------- */
-function json_(obj) {
+export function json_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function jsonError_(message) {
+export function jsonError_(message) {
   return json_({ error: message });
 }
