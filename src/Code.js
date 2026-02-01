@@ -1,30 +1,72 @@
 export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+const CACHE_SEC = 600; // 10分（600秒）
 
+/**
+ * 【バッチ処理】10分ごとに実行
+ * キャッシュの生成（書き込み）はこの関数のみが行う
+ */
+export function preCacheAll() {
+  const cache = CacheService.getScriptCache();
+
+  // 1. 全ID一覧を取得してキャッシュ（キー: "0"）
+  const allIds = listDocIdsSortedByName_(FOLDER_ID);
+  cache.put("0", JSON.stringify(allIds), CACHE_SEC);
+  console.log("一覧をキャッシュしました");
+
+  // 2. 先頭10件の内容をキャッシュ
+  const targetIds = allIds.slice(0, 10);
+  targetIds.forEach(docId => {
+    try {
+      const doc = DocumentApp.openById(docId);
+      const payload = JSON.stringify({
+        id: docId,
+        title: doc.getName(),
+        markdown: docBodyToMarkdown_(doc)
+      });
+
+      if (payload.length < 100000) {
+        cache.put(docId, payload, CACHE_SEC);
+        console.log(`キャッシュ完了: ${doc.getName()}`);
+      }
+    } catch (e) {
+      console.error(`ID:${docId} のキャッシュ作成失敗: ${e.message}`);
+    }
+  });
+}
+
+/**
+ * 【Web API】読み取り専用
+ * キャッシュがあればそれを返し、なければその場で生成する（保存はしない）
+ */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
+  const cache = CacheService.getScriptCache();
 
-  // id未指定：フォルダ内DocsのID一覧（名前順）をJSONで返す
+  // --- パターンA: ID未指定（一覧取得） ---
   if (!docId) {
-    const ids = listDocIdsSortedByName_(FOLDER_ID);
-    return json_(ids);
+    const cachedList = cache.get("0");
+    if (cachedList) {
+      return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
+    }
+    // キャッシュがない場合はその場で計算（putはしない）
+    return json_(listDocIdsSortedByName_(FOLDER_ID));
   }
 
-  // id指定：そのDocsがフォルダ内にあるか確認 & タイトル取得
-  const info = getDocInfoInFolder_(FOLDER_ID, docId);
-  if (!info.exists) {
-    return jsonError_('Document not found in the specified folder');
+  // --- パターンB: ID指定（ドキュメント取得） ---
+  const cachedDoc = cache.get(docId);
+  if (cachedDoc) {
+    return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
+
+  // キャッシュにない場合（11件目以降、または10分経過後）
+  const info = getDocInfoInFolder_(FOLDER_ID, docId);
+  if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
-  const title = info.name;
-
-  // 本文をMarkdown化（ベストエフォート）
-  const md = docBodyToMarkdown_(doc);
-
   return json_({
     id: docId,
-    title: title,
-    markdown: md
+    title: info.name,
+    markdown: docBodyToMarkdown_(doc)
   });
 }
 
