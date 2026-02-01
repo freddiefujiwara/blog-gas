@@ -1,4 +1,6 @@
 export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+export const CACHE_TTL = 600;
+export const CACHE_SIZE_LIMIT = 100000;
 
 /**
  * 【バッチ処理】定期的に実行してプロパティを更新
@@ -10,8 +12,8 @@ export function preCacheAll() {
   const allIds = listDocIdsSortedByName_(FOLDER_ID);
   const listPayload = JSON.stringify(allIds);
   try {
-    if (listPayload.length < 9000) {
-      cache.put("0", listPayload, 600);
+    if (listPayload.length < CACHE_SIZE_LIMIT) {
+      cache.put("0", listPayload, CACHE_TTL);
       console.log("一覧を保存しました");
     }
   } catch (e) {
@@ -29,8 +31,8 @@ export function preCacheAll() {
         markdown: docBodyToMarkdown_(doc)
       });
 
-      if (payload.length < 9000) {
-        cache.put(docId, payload, 600);
+      if (payload.length < CACHE_SIZE_LIMIT) {
+        cache.put(docId, payload, CACHE_TTL);
         console.log(`保存完了: ${doc.getName()}`);
       }
     } catch (e) {

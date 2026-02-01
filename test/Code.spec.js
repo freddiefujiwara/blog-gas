@@ -98,7 +98,7 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), 600);
+      expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
       expect(mockCache.put).toHaveBeenCalledTimes(11);
     });
 
@@ -148,7 +148,7 @@ describe('Code.js', () => {
       };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
 
-      const largeContent = 'a'.repeat(9000);
+      const largeContent = 'a'.repeat(Code.CACHE_SIZE_LIMIT);
       mockDocumentApp.openById.mockImplementation(() => ({
         getName: () => 'Large Doc',
         getBody: () => ({
@@ -164,7 +164,7 @@ describe('Code.js', () => {
 
       // Should only call put for the list ('0'), not for the document
       expect(mockCache.put).toHaveBeenCalledTimes(1);
-      expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), 600);
+      expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
     });
   });
 
