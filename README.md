@@ -58,5 +58,12 @@ Here are the main parts of the code:
    npm run deploy
    ```
    This pushes the code to your Google Apps Script project.
+4. **Set up Trigger**:
+   To enable caching, you must set up a time-driven trigger in the Google Apps Script editor:
+   - Go to **Triggers** (clock icon on the left).
+   - Click **Add Trigger**.
+   - Select `preCacheAll` as the function to run.
+   - Select **Time-driven** as the event source.
+   - Select **Minutes timer** and **Every 10 minutes** as the type of time-based trigger.
 
 Note: You may need to add the "Google Drive API" to your Google Apps Script project for the folder listing to work.
