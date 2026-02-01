@@ -1,0 +1,14 @@
+{
+  "timeZone": "Asia/Tokyo",
+  "runtimeVersion": "V8",
+  "exceptionLogging": "STACKDRIVER",
+
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/documents"
+  ],
+
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE"
+  }
+}
