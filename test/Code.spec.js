@@ -205,6 +205,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
+      expect(global.console.log).toHaveBeenCalledWith("一覧がキャッシュにありません。Driveから取得します");
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
       expect(mockCache.put).not.toHaveBeenCalled();
     });
@@ -302,6 +303,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
+      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${fileId})がキャッシュにありません。生成します`);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
       expect(mockCache.put).not.toHaveBeenCalled();

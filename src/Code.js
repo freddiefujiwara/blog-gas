@@ -55,6 +55,7 @@ export function doGet(e) {
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
     // キャッシュがない場合はその場で計算する（保存はしない）
+    console.log("一覧がキャッシュにありません。Driveから取得します");
     const allIds = listDocIdsSortedByName_(FOLDER_ID);
     return json_(allIds);
   }
@@ -67,6 +68,7 @@ export function doGet(e) {
   }
 
   // キャッシュにない場合: その場で生成する（保存はしない）
+  console.log(`ドキュメント(ID:${docId})がキャッシュにありません。生成します`);
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
 
