@@ -2,6 +2,8 @@
 
 This project is a Google Apps Script. It turns Google Docs into Markdown text. It works as a Web App that you can call like an API.
 
+The frontend source code that consumes this API can be found at: https://github.com/freddiefujiwara/blog
+
 ## What it does
 
 - **List Files**: It shows a list of Google Doc IDs from a specific folder.
