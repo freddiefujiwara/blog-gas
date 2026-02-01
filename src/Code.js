@@ -46,6 +46,7 @@ export function doGet(e) {
   if (!docId) {
     const cachedList = cache.get("0");
     if (cachedList) {
+      console.log("一覧をキャッシュから取得しました");
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
     // キャッシュがない場合はその場で計算（putはしない）
@@ -55,6 +56,7 @@ export function doGet(e) {
   // --- パターンB: ID指定（ドキュメント取得） ---
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
+    console.log(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 

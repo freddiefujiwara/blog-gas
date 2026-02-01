@@ -163,7 +163,7 @@ describe('Code.js', () => {
   });
 
   describe('doGet', () => {
-    it('should return a list of doc IDs from cache if available', () => {
+    it('should return a list of doc IDs from cache if available and log it', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
@@ -172,6 +172,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
+      expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
     });
 
@@ -216,7 +217,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalled();
     });
 
-    it('should return document from cache if available', () => {
+    it('should return document from cache if available and log it', () => {
       const docId = 'cachedDocId';
       const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD' });
       mockCache.get.mockImplementation((key) => {
@@ -231,6 +232,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith(docId);
+      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
     });
 
