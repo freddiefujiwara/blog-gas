@@ -121,6 +121,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'Hello World',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }),
@@ -155,6 +156,7 @@ describe('Code.js', () => {
             getType: () => mockDocumentApp.ElementType.TEXT,
             asText: () => ({
               getText: () => 'Heading',
+              getTextAttributeIndices: () => [0],
               getAttributes: () => ({}),
             }),
           }),
@@ -197,19 +199,6 @@ describe('Code.js', () => {
       });
     });
 
-    describe('sameTextAttrs_', () => {
-      it('should return true if bold, italic, and link_url are same', () => {
-        const a = { [mockDocumentApp.Attribute.BOLD]: true, [mockDocumentApp.Attribute.ITALIC]: false, [mockDocumentApp.Attribute.LINK_URL]: null };
-        const b = { [mockDocumentApp.Attribute.BOLD]: true, [mockDocumentApp.Attribute.ITALIC]: false, [mockDocumentApp.Attribute.LINK_URL]: null };
-        expect(Code.sameTextAttrs_(a, b)).toBe(true);
-      });
-
-      it('should return false if any of them are different', () => {
-        const a = { [mockDocumentApp.Attribute.BOLD]: true };
-        const b = { [mockDocumentApp.Attribute.BOLD]: false };
-        expect(Code.sameTextAttrs_(a, b)).toBe(false);
-      });
-    });
 
     describe('listItemToMarkdown_', () => {
       it('should return correctly indented and bulleted markdown', () => {
@@ -219,6 +208,7 @@ describe('Code.js', () => {
             getType: () => mockDocumentApp.ElementType.TEXT,
             asText: () => ({
               getText: () => 'Item 1',
+              getTextAttributeIndices: () => [0],
               getAttributes: () => ({}),
             }),
           }),
@@ -270,6 +260,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'item',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }),
@@ -324,6 +315,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'text',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }
@@ -337,6 +329,7 @@ describe('Code.js', () => {
           getType: () => mockDocumentApp.ElementType.TEXT,
           asText: () => ({
             getText: () => 'bold italic link',
+            getTextAttributeIndices: () => [0, 4, 11],
             getAttributes: (i) => {
               if (i < 4) return { [mockDocumentApp.Attribute.BOLD]: true };
               if (i < 11) return { [mockDocumentApp.Attribute.ITALIC]: true };
@@ -350,15 +343,29 @@ describe('Code.js', () => {
           getChild: () => mockText,
         };
 
-        // 'bold' (0-4), ' italic' (4-11), ' link' (11-16)
-        // Wait, sameTextAttrs_ checks BOLD, ITALIC, LINK_URL.
-        // The loop in paragraphTextWithInlineStyles_ will split at 4, 11, 16.
-        // 0-4: 'bold' -> **bold**
-        // 4-11: ' italic' -> * italic*
-        // 11-16: ' link' -> [ link](http://example.com)
-
         const result = Code.paragraphTextWithInlineStyles_(mockP);
         expect(result).toBe('**bold*** italic*[ link](http://example.com)');
+      });
+
+      it('should handle combined bold and italic', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'bolditalic',
+            getTextAttributeIndices: () => [0],
+            getAttributes: () => ({
+              [mockDocumentApp.Attribute.BOLD]: true,
+              [mockDocumentApp.Attribute.ITALIC]: true,
+            }),
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        const result = Code.paragraphTextWithInlineStyles_(mockP);
+        expect(result).toBe('***bolditalic***');
       });
     });
   });

@@ -188,75 +188,63 @@ export function isOrderedGlyph_(glyphType) {
 }
 
 /**
- * 段落内の太字/斜体/リンクを最低限Markdown化
- * - **bold**
- * - *italic*
- * - [text](url)
- * それ以外は素直にテキスト
+ * 段落内の太字/斜体/リンクをMarkdown化（高速・堅牢版）
+ * 改良点：
+ * - 属性境界（indices）の取得を効率化し、空配列等のエッジケースをケア
+ * - 文字列結合を配列（out.push/join）に集約し、長文でのメモリ効率を最適化
  */
 export function paragraphTextWithInlineStyles_(p) {
-  // Paragraph/ListItem は Text を子に持つことが多い
-  // getText() だけだとスタイルが落ちるので、Text要素を追って変換
-  let out = '';
+  const out = [];
   const num = p.getNumChildren();
 
   for (let i = 0; i < num; i++) {
     const child = p.getChild(i);
-    if (child.getType() !== DocumentApp.ElementType.TEXT) {
-      // InlineImage等は無視（必要ならここで ![alt](url) などに拡張）
-      continue;
-    }
+    if (child.getType() !== DocumentApp.ElementType.TEXT) continue;
 
     const textEl = child.asText();
-    const full = textEl.getText();
-    if (!full) continue;
+    const fullText = textEl.getText();
+    if (!fullText) continue;
 
-    // 文字ごとに属性が変わるので、属性の連続区間ごとに分割
-    let start = 0;
-    while (start < full.length) {
+    // スタイル境界を取得（無ければ空配列で初期化）
+    let indices = textEl.getTextAttributeIndices() || [];
+
+    // 0 と末尾の境界を保証
+    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
+    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
+
+    for (let k = 0; k < indices.length - 1; k++) {
+      const start = indices[k];
+      const end = indices[k + 1];
+      if (start >= end) continue;
+
+      let chunk = fullText.substring(start, end);
+      if (!chunk) continue;
+
+      // 属性取得とフラグ変換
       const attrs = textEl.getAttributes(start);
-      let end = start + 1;
-      while (end < full.length) {
-        const a2 = textEl.getAttributes(end);
-        if (!sameTextAttrs_(attrs, a2)) break;
-        end++;
-      }
-
-      let chunk = full.slice(start, end);
-
-      // 改行は段落側で処理するのでここではそのまま
-      chunk = chunk.replace(/\r/g, '');
-
       const link = attrs[DocumentApp.Attribute.LINK_URL];
       const bold = !!attrs[DocumentApp.Attribute.BOLD];
       const italic = !!attrs[DocumentApp.Attribute.ITALIC];
 
-      // Markdownの予約文字は最低限エスケープ
-      chunk = escapeMdInline_(chunk);
+      // 特殊文字エスケープと改行正規化
+      chunk = escapeMdInline_(chunk.replace(/\r/g, ''));
 
+      // Markdown変換ロジック
       if (link) {
         chunk = `[${chunk}](${link})`;
-      } else {
-        if (bold) chunk = `**${chunk}**`;
-        if (italic) chunk = `*${chunk}*`;
+      } else if (bold && italic) {
+        chunk = `***${chunk}***`;
+      } else if (bold) {
+        chunk = `**${chunk}**`;
+      } else if (italic) {
+        chunk = `*${chunk}*`;
       }
 
-      out += chunk;
-
-      start = end;
+      out.push(chunk);
     }
   }
 
-  return out;
-}
-
-export function sameTextAttrs_(a, b) {
-  // 比較対象を絞る（必要なものだけ）
-  return (
-    a[DocumentApp.Attribute.BOLD] === b[DocumentApp.Attribute.BOLD] &&
-    a[DocumentApp.Attribute.ITALIC] === b[DocumentApp.Attribute.ITALIC] &&
-    a[DocumentApp.Attribute.LINK_URL] === b[DocumentApp.Attribute.LINK_URL]
-  );
+  return out.join('');
 }
 
 export function escapeMdInline_(s) {
