@@ -109,6 +109,19 @@ describe('Code.js', () => {
       expect(mockCache.put).toHaveBeenCalledTimes(11);
     });
 
+    it('should handle errors during list caching in preCacheAll', () => {
+      const mockIterator = { hasNext: () => false };
+      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      mockCache.put.mockImplementation((key) => {
+        if (key === '0') throw new Error('List put failed');
+      });
+
+      Code.preCacheAll();
+
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('一覧のキャッシュ作成失敗: List put failed'));
+    });
+
     it('should handle errors during document caching', () => {
       const mockFiles = [{ getId: () => 'fail-id', getName: () => 'Fail Doc' }];
       let index = 0;
@@ -176,7 +189,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
     });
 
-    it('should return a list of doc IDs from Drive if not in cache', () => {
+    it('should return a list of doc IDs from Drive and write to cache if not in cache', () => {
       mockCache.get.mockReturnValue(null);
       const mockFiles = [
         { getId: () => 'id2', getName: () => 'Doc B' },
@@ -200,6 +213,22 @@ describe('Code.js', () => {
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
+      expect(mockCache.put).toHaveBeenCalledWith('0', JSON.stringify(['id2', 'id1']), 600);
+    });
+
+    it('should handle cache.put error when writing the list in doGet', () => {
+      mockCache.get.mockReturnValue(null);
+      const mockIterator = { hasNext: () => false };
+      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      mockCache.put.mockImplementation((key) => {
+        if (key === '0') throw new Error('Quota exceeded');
+      });
+
+      const e = { parameter: {} };
+      Code.doGet(e);
+
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining("一覧のキャッシュ保存に失敗しました: Quota exceeded"));
     });
 
     it('should handle null e or e.parameter', () => {
@@ -251,7 +280,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
-    it('should return document title and markdown when a valid ID is provided', () => {
+    it('should return document title and markdown and write to cache when a valid ID is provided and not in cache', () => {
       const fileId = 'valid-id';
       const mockParentsIterator = {
         hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
@@ -297,6 +326,35 @@ describe('Code.js', () => {
       expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
+      expect(mockCache.put).toHaveBeenCalledWith(fileId, expect.any(String), 600);
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})を生成し、キャッシュに保存しました`));
+    });
+
+    it('should handle cache.put error when writing the document in doGet', () => {
+      const fileId = 'valid-id';
+      const mockParentsIterator = {
+        hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
+      };
+      const mockFile = {
+        getMimeType: () => mockMimeType.GOOGLE_DOCS,
+        getParents: () => mockParentsIterator,
+        getName: () => 'Valid Doc',
+      };
+      mockDriveApp.getFileById.mockReturnValue(mockFile);
+      mockDocumentApp.openById.mockReturnValue({
+        getName: () => 'Valid Doc',
+        getBody: () => ({ getNumChildren: () => 0 }),
+      });
+      mockCache.get.mockReturnValue(null);
+      mockCache.put.mockImplementation((key) => {
+        if (key === fileId) throw new Error('Put failed');
+      });
+
+      const e = { parameter: { id: fileId } };
+      Code.doGet(e);
+
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})のキャッシュ保存に失敗しました: Put failed`));
     });
   });
 

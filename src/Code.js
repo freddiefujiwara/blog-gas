@@ -10,8 +10,15 @@ export function preCacheAll() {
 
   // 1. 全ID一覧を取得してキャッシュ（キー: "0"）
   const allIds = listDocIdsSortedByName_(FOLDER_ID);
-  cache.put("0", JSON.stringify(allIds), CACHE_SEC);
-  console.log("一覧をキャッシュしました");
+  const listPayload = JSON.stringify(allIds);
+  try {
+    if (listPayload.length < 100000) {
+      cache.put("0", listPayload, CACHE_SEC);
+      console.log("一覧をキャッシュしました");
+    }
+  } catch (e) {
+    console.error("一覧のキャッシュ作成失敗: " + e.message);
+  }
 
   // 2. 先頭10件の内容をキャッシュ
   const targetIds = allIds.slice(0, 10);
@@ -35,8 +42,8 @@ export function preCacheAll() {
 }
 
 /**
- * 【Web API】読み取り専用
- * キャッシュがあればそれを返し、なければその場で生成する（保存はしない）
+ * 【Web API】
+ * キャッシュがあればそれを返し、なければその場で生成してキャッシュに保存する（Write-on-miss）
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
@@ -49,8 +56,17 @@ export function doGet(e) {
       console.log("一覧をキャッシュから取得しました");
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
-    // キャッシュがない場合はその場で計算（putはしない）
-    return json_(listDocIdsSortedByName_(FOLDER_ID));
+    // キャッシュがない場合はその場で計算し、キャッシュに保存
+    const allIds = listDocIdsSortedByName_(FOLDER_ID);
+    const payload = JSON.stringify(allIds);
+    try {
+      if (payload.length < 100000) {
+        cache.put("0", payload, CACHE_SEC);
+      }
+    } catch (err) {
+      console.error("一覧のキャッシュ保存に失敗しました: " + err.message);
+    }
+    return json_(allIds);
   }
 
   // --- パターンB: ID指定（ドキュメント取得） ---
@@ -60,16 +76,27 @@ export function doGet(e) {
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // キャッシュにない場合（11件目以降、または10分経過後）
+  // キャッシュにない場合（11件目以降、または10分経過後）: その場で生成し、キャッシュに保存
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
-  return json_({
+  const result = {
     id: docId,
     title: info.name,
     markdown: docBodyToMarkdown_(doc)
-  });
+  };
+  const payload = JSON.stringify(result);
+  try {
+    if (payload.length < 100000) {
+      cache.put(docId, payload, CACHE_SEC);
+      console.log(`ドキュメント(ID:${docId})を生成し、キャッシュに保存しました`);
+    }
+  } catch (err) {
+    console.error(`ドキュメント(ID:${docId})のキャッシュ保存に失敗しました: ${err.message}`);
+  }
+
+  return json_(result);
 }
 
 /** -----------------------------
