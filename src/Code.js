@@ -9,13 +9,14 @@ export function doGet(e) {
     return json_(ids);
   }
 
-  // id指定：そのDocsがフォルダ内にあるか確認
-  if (!existsInFolder_(FOLDER_ID, docId)) {
+  // id指定：そのDocsがフォルダ内にあるか確認 & タイトル取得
+  const info = getDocInfoInFolder_(FOLDER_ID, docId);
+  if (!info.exists) {
     return jsonError_('Document not found in the specified folder');
   }
 
   const doc = DocumentApp.openById(docId);
-  const title = doc.getName();
+  const title = info.name;
 
   // 本文をMarkdown化（ベストエフォート）
   const md = docBodyToMarkdown_(doc);
@@ -44,15 +45,26 @@ export function listDocIdsSortedByName_(folderId) {
   return docs.map(d => d.id);
 }
 
-export function existsInFolder_(folderId, fileId) {
-  const folder = DriveApp.getFolderById(folderId);
-  const files = folder.getFilesByType(MimeType.GOOGLE_DOCS);
-
-  while (files.hasNext()) {
-    const f = files.next();
-    if (f.getId() === fileId) return true;
+/**
+ * 指定フォルダ内に該当Docが存在するか確認し、情報を返す
+ * 高速化：全ファイル走査(O(N))を避け、ファイルの親フォルダを確認(O(Parents))する
+ */
+export function getDocInfoInFolder_(folderId, fileId) {
+  try {
+    const file = DriveApp.getFileById(fileId);
+    if (file.getMimeType() !== MimeType.GOOGLE_DOCS) {
+      return { exists: false };
+    }
+    const parents = file.getParents();
+    while (parents.hasNext()) {
+      if (parents.next().getId() === folderId) {
+        return { exists: true, name: file.getName() };
+      }
+    }
+  } catch (e) {
+    // 指定IDが存在しない、またはアクセス権がない場合
   }
-  return false;
+  return { exists: false };
 }
 
 /** -----------------------------
@@ -61,8 +73,9 @@ export function existsInFolder_(folderId, fileId) {
 export function docBodyToMarkdown_(doc) {
   const body = doc.getBody();
   const out = [];
+  const numChildren = body.getNumChildren();
 
-  for (let i = 0; i < body.getNumChildren(); i++) {
+  for (let i = 0; i < numChildren; i++) {
     const el = body.getChild(i);
     out.push(elementToMarkdown_(el));
   }
@@ -77,20 +90,17 @@ export function docBodyToMarkdown_(doc) {
 export function elementToMarkdown_(el) {
   const t = el.getType();
 
-  if (t === DocumentApp.ElementType.PARAGRAPH) {
-    return paragraphToMarkdown_(el.asParagraph());
-  }
+  // ディスパッチテーブルを使用して条件分岐を高速化
+  const converters = {
+    [DocumentApp.ElementType.PARAGRAPH]: (e) => paragraphToMarkdown_(e.asParagraph()),
+    [DocumentApp.ElementType.LIST_ITEM]: (e) => listItemToMarkdown_(e.asListItem()),
+    [DocumentApp.ElementType.TABLE]: (e) => tableToMarkdown_(e.asTable()),
+    [DocumentApp.ElementType.HORIZONTAL_RULE]: () => '\n---\n',
+  };
 
-  if (t === DocumentApp.ElementType.LIST_ITEM) {
-    return listItemToMarkdown_(el.asListItem());
-  }
-
-  if (t === DocumentApp.ElementType.TABLE) {
-    return tableToMarkdown_(el.asTable());
-  }
-
-  if (t === DocumentApp.ElementType.HORIZONTAL_RULE) {
-    return '\n---\n';
+  const converter = converters[t];
+  if (converter) {
+    return converter(el);
   }
 
   // それ以外は無理に変換せずテキスト化
@@ -133,15 +143,15 @@ export function listItemToMarkdown_(li) {
 
 export function tableToMarkdown_(table) {
   // 簡易：1行目をヘッダとしてMarkdown表にする（ヘッダが不要ならここ変えてOK）
-  const rows = table.getNumRows();
-  if (rows === 0) return '';
+  const numRows = table.getNumRows();
+  if (numRows === 0) return '';
 
   const matrix = [];
-  for (let r = 0; r < rows; r++) {
+  for (let r = 0; r < numRows; r++) {
     const row = table.getRow(r);
-    const cols = row.getNumCells();
+    const numCells = row.getNumCells();
     const cells = [];
-    for (let c = 0; c < cols; c++) {
+    for (let c = 0; c < numCells; c++) {
       const cell = row.getCell(c);
       const cellText = (cell.getText() || '').replace(/\n+/g, ' ').trim();
       cells.push(escapeMdTable_(cellText));
@@ -196,6 +206,7 @@ export function isOrderedGlyph_(glyphType) {
 export function paragraphTextWithInlineStyles_(p) {
   const out = [];
   const num = p.getNumChildren();
+  const { BOLD, ITALIC, LINK_URL } = DocumentApp.Attribute;
 
   for (let i = 0; i < num; i++) {
     const child = p.getChild(i);
@@ -221,10 +232,11 @@ export function paragraphTextWithInlineStyles_(p) {
       if (!chunk) continue;
 
       // 属性取得とフラグ変換
+      // getAttributes(start)の結果から属性を抽出し、定数参照を最小限にする
       const attrs = textEl.getAttributes(start);
-      const link = attrs[DocumentApp.Attribute.LINK_URL];
-      const bold = !!attrs[DocumentApp.Attribute.BOLD];
-      const italic = !!attrs[DocumentApp.Attribute.ITALIC];
+      const link = attrs[LINK_URL];
+      const bold = !!attrs[BOLD];
+      const italic = !!attrs[ITALIC];
 
       // 特殊文字エスケープと改行正規化
       chunk = escapeMdInline_(chunk.replace(/\r/g, ''));
