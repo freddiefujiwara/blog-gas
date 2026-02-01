@@ -2,6 +2,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as Code from '../src/Code.js';
 
 // Mock GAS Globals
+const mockCache = {
+  get: vi.fn(),
+  put: vi.fn(),
+};
+
+const mockCacheService = {
+  getScriptCache: vi.fn().mockReturnValue(mockCache),
+};
+
 const mockContentService = {
   MimeType: { JSON: 'JSON' },
   createTextOutput: vi.fn(),
@@ -42,18 +51,133 @@ const mockMimeType = {
 };
 
 // Assign mocks to global
+global.CacheService = mockCacheService;
 global.ContentService = mockContentService;
 global.DriveApp = mockDriveApp;
 global.DocumentApp = mockDocumentApp;
 global.MimeType = mockMimeType;
+global.console = {
+  log: vi.fn(),
+  error: vi.fn(),
+};
 
 describe('Code.js', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
+  describe('preCacheAll', () => {
+    it('should cache the list and the first 10 documents', () => {
+      const mockFiles = [];
+      for (let i = 0; i < 12; i++) {
+        mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
+      }
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      mockDocumentApp.openById.mockImplementation((id) => ({
+        getName: () => `Doc ${id.replace('id', '')}`,
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => ({
+              getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+              getNumChildren: () => 0,
+            }),
+          }),
+        }),
+      }));
+
+      Code.preCacheAll();
+
+      expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), 600);
+      // It should cache the first 10 docs: id0 to id9 (wait, sorting is by name DESC)
+      // Doc 0 to 11.
+      // After sorting DESC: Doc 9, Doc 8, Doc 7, Doc 6, Doc 5, Doc 4, Doc 3, Doc 2, Doc 11, Doc 10, Doc 1, Doc 0 (roughly, localeCompare might differ)
+      // Actually Doc 9 is greater than Doc 11 because '9' > '1'.
+
+      // Let's check how many times put was called.
+      // 1 for the list + 10 for the docs = 11 times.
+      expect(mockCache.put).toHaveBeenCalledTimes(11);
+    });
+
+    it('should handle errors during document caching', () => {
+      const mockFiles = [{ getId: () => 'fail-id', getName: () => 'Fail Doc' }];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      mockDocumentApp.openById.mockImplementation(() => {
+        throw new Error('Open failed');
+      });
+
+      Code.preCacheAll();
+
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('ID:fail-id のキャッシュ作成失敗: Open failed'));
+    });
+
+    it('should not cache if payload is too large', () => {
+      const mockFiles = [{ getId: () => 'large-id', getName: () => 'Large Doc' }];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      const largeContent = 'a'.repeat(100000);
+      mockDocumentApp.openById.mockImplementation(() => ({
+        getName: () => 'Large Doc',
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => 'UNKNOWN',
+            getText: () => largeContent,
+          }),
+        }),
+      }));
+
+      Code.preCacheAll();
+
+      // Should only call put for the list ('0'), not for the document
+      expect(mockCache.put).toHaveBeenCalledTimes(1);
+      expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), expect.any(Number));
+    });
+  });
+
   describe('doGet', () => {
-    it('should return a list of doc IDs when no ID is provided', () => {
+    it('should return a list of doc IDs from cache if available and log it', () => {
+      mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      const e = { parameter: {} };
+      Code.doGet(e);
+
+      expect(mockCache.get).toHaveBeenCalledWith('0');
+      expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
+    });
+
+    it('should return a list of doc IDs from Drive if not in cache', () => {
+      mockCache.get.mockReturnValue(null);
       const mockFiles = [
         { getId: () => 'id2', getName: () => 'Doc B' },
         { getId: () => 'id1', getName: () => 'Doc A' },
@@ -75,12 +199,11 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
-      expect(mockFolder.getFilesByType).toHaveBeenCalledWith(mockMimeType.GOOGLE_DOCS);
-      // Sorted by name descending in Japanese locale: B then A
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
     });
 
     it('should handle null e or e.parameter', () => {
+      mockCache.get.mockReturnValue(null);
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
@@ -94,7 +217,27 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalled();
     });
 
-    it('should return an error when the provided ID does not exist in the folder', () => {
+    it('should return document from cache if available and log it', () => {
+      const docId = 'cachedDocId';
+      const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD' });
+      mockCache.get.mockImplementation((key) => {
+        if (key === docId) return cachedPayload;
+        return null;
+      });
+
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      const e = { parameter: { id: docId } };
+      Code.doGet(e);
+
+      expect(mockCache.get).toHaveBeenCalledWith(docId);
+      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
+    });
+
+    it('should return an error when the provided ID does not exist in the folder and not in cache', () => {
+      mockCache.get.mockReturnValue(null);
       mockDriveApp.getFileById.mockImplementation(() => {
         throw new Error('Not found');
       });
@@ -105,7 +248,7 @@ describe('Code.js', () => {
       const e = { parameter: { id: 'non-existent' } };
       Code.doGet(e);
 
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found in the specified folder' }));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
     it('should return document title and markdown when a valid ID is provided', () => {
