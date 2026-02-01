@@ -4,14 +4,14 @@ export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
  * 【バッチ処理】定期的に実行してプロパティを更新
  */
 export function preCacheAll() {
-  const props = PropertiesService.getScriptProperties();
+  const cache = CacheService.getScriptCache();
 
   // 1. 全ID一覧を取得して保存（キー: "0"）
   const allIds = listDocIdsSortedByName_(FOLDER_ID);
   const listPayload = JSON.stringify(allIds);
   try {
     if (listPayload.length < 9000) {
-      props.setProperty("0", listPayload);
+      cache.put("0", listPayload, 600);
       console.log("一覧を保存しました");
     }
   } catch (e) {
@@ -30,7 +30,7 @@ export function preCacheAll() {
       });
 
       if (payload.length < 9000) {
-        props.setProperty(docId, payload);
+        cache.put(docId, payload, 600);
         console.log(`保存完了: ${doc.getName()}`);
       }
     } catch (e) {
@@ -41,40 +41,32 @@ export function preCacheAll() {
 
 /**
  * 【Web API】
- * プロパティがあればそれを返し、なければその場で生成して保存する（Write-on-miss）
+ * キャッシュがあればそれを返し、なければその場で生成する（doGet内ではputしない）
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
-  const props = PropertiesService.getScriptProperties();
+  const cache = CacheService.getScriptCache();
 
   // --- パターンA: ID未指定（一覧取得） ---
   if (!docId) {
-    const cachedList = props.getProperty("0");
+    const cachedList = cache.get("0");
     if (cachedList) {
-      console.log("一覧をプロパティから取得しました");
+      console.log("一覧をキャッシュから取得しました");
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
-    // プロパティがない場合はその場で計算し、保存する
+    // キャッシュがない場合はその場で計算する（保存はしない）
     const allIds = listDocIdsSortedByName_(FOLDER_ID);
-    const payload = JSON.stringify(allIds);
-    try {
-      if (payload.length < 9000) {
-        props.setProperty("0", payload);
-      }
-    } catch (e) {
-      console.error("一覧の保存に失敗しました: " + e.message);
-    }
     return json_(allIds);
   }
 
   // --- パターンB: ID指定（ドキュメント取得） ---
-  const cachedDoc = props.getProperty(docId);
+  const cachedDoc = cache.get(docId);
   if (cachedDoc) {
-    console.log(`ドキュメント(ID:${docId})をプロパティから取得しました`);
+    console.log(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // プロパティにない場合: その場で生成し、保存する
+  // キャッシュにない場合: その場で生成する（保存はしない）
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
 
@@ -84,15 +76,6 @@ export function doGet(e) {
     title: info.name,
     markdown: docBodyToMarkdown_(doc)
   };
-  const payload = JSON.stringify(result);
-  try {
-    if (payload.length < 9000) {
-      props.setProperty(docId, payload);
-      console.log(`ドキュメント(ID:${docId})を生成し、プロパティに保存しました`);
-    }
-  } catch (e) {
-    console.error(`ドキュメント(ID:${docId})の保存に失敗しました: ${e.message}`);
-  }
 
   return json_(result);
 }

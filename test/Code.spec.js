@@ -2,13 +2,13 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as Code from '../src/Code.js';
 
 // Mock GAS Globals
-const mockProps = {
-  getProperty: vi.fn(),
-  setProperty: vi.fn(),
+const mockCache = {
+  get: vi.fn(),
+  put: vi.fn(),
 };
 
-const mockPropertiesService = {
-  getScriptProperties: vi.fn().mockReturnValue(mockProps),
+const mockCacheService = {
+  getScriptCache: vi.fn().mockReturnValue(mockCache),
 };
 
 const mockContentService = {
@@ -51,7 +51,7 @@ const mockMimeType = {
 };
 
 // Assign mocks to global
-global.PropertiesService = mockPropertiesService;
+global.CacheService = mockCacheService;
 global.ContentService = mockContentService;
 global.DriveApp = mockDriveApp;
 global.DocumentApp = mockDocumentApp;
@@ -98,21 +98,21 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      expect(mockProps.setProperty).toHaveBeenCalledWith('0', expect.any(String));
-      expect(mockProps.setProperty).toHaveBeenCalledTimes(11);
+      expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), 600);
+      expect(mockCache.put).toHaveBeenCalledTimes(11);
     });
 
     it('should handle errors during list saving in preCacheAll', () => {
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
-      mockProps.setProperty.mockImplementation((key) => {
-        if (key === '0') throw new Error('List set failed');
+      mockCache.put.mockImplementation((key) => {
+        if (key === '0') throw new Error('List put failed');
       });
 
       Code.preCacheAll();
 
-      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('一覧の保存失敗: List set failed'));
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('一覧の保存失敗: List put failed'));
     });
 
     it('should handle errors during document saving in preCacheAll', () => {
@@ -162,28 +162,28 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      // Should only call setProperty for the list ('0'), not for the document
-      expect(mockProps.setProperty).toHaveBeenCalledTimes(1);
-      expect(mockProps.setProperty).not.toHaveBeenCalledWith('large-id', expect.any(String));
+      // Should only call put for the list ('0'), not for the document
+      expect(mockCache.put).toHaveBeenCalledTimes(1);
+      expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), 600);
     });
   });
 
   describe('doGet', () => {
-    it('should return a list of doc IDs from properties if available and log it', () => {
-      mockProps.getProperty.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
+    it('should return a list of doc IDs from cache if available and log it', () => {
+      mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: {} };
       Code.doGet(e);
 
-      expect(mockProps.getProperty).toHaveBeenCalledWith('0');
-      expect(global.console.log).toHaveBeenCalledWith("一覧をプロパティから取得しました");
+      expect(mockCache.get).toHaveBeenCalledWith('0');
+      expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
     });
 
-    it('should return a list of doc IDs from Drive and write to properties if not found', () => {
-      mockProps.getProperty.mockReturnValue(null);
+    it('should return a list of doc IDs from Drive and NOT write to cache if not found', () => {
+      mockCache.get.mockReturnValue(null);
       const mockFiles = [
         { getId: () => 'id2', getName: () => 'Doc B' },
         { getId: () => 'id1', getName: () => 'Doc A' },
@@ -206,26 +206,11 @@ describe('Code.js', () => {
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
-      expect(mockProps.setProperty).toHaveBeenCalledWith('0', JSON.stringify(['id2', 'id1']));
-    });
-
-    it('should handle setProperty error when writing the list in doGet', () => {
-      mockProps.getProperty.mockReturnValue(null);
-      const mockIterator = { hasNext: () => false };
-      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
-      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
-      mockProps.setProperty.mockImplementation((key) => {
-        if (key === '0') throw new Error('Quota exceeded');
-      });
-
-      const e = { parameter: {} };
-      Code.doGet(e);
-
-      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining("一覧の保存に失敗しました: Quota exceeded"));
+      expect(mockCache.put).not.toHaveBeenCalled();
     });
 
     it('should handle null e or e.parameter', () => {
-      mockProps.getProperty.mockReturnValue(null);
+      mockCache.get.mockReturnValue(null);
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
@@ -239,10 +224,10 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalled();
     });
 
-    it('should return document from properties if available and log it', () => {
+    it('should return document from cache if available and log it', () => {
       const docId = 'cachedDocId';
       const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD' });
-      mockProps.getProperty.mockImplementation((key) => {
+      mockCache.get.mockImplementation((key) => {
         if (key === docId) return cachedPayload;
         return null;
       });
@@ -253,13 +238,13 @@ describe('Code.js', () => {
       const e = { parameter: { id: docId } };
       Code.doGet(e);
 
-      expect(mockProps.getProperty).toHaveBeenCalledWith(docId);
-      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をプロパティから取得しました`);
+      expect(mockCache.get).toHaveBeenCalledWith(docId);
+      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
     });
 
-    it('should return an error when the provided ID does not exist in the folder and not in properties', () => {
-      mockProps.getProperty.mockReturnValue(null);
+    it('should return an error when the provided ID does not exist in the folder and not in cache', () => {
+      mockCache.get.mockReturnValue(null);
       mockDriveApp.getFileById.mockImplementation(() => {
         throw new Error('Not found');
       });
@@ -273,7 +258,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
-    it('should return document title and markdown and write to properties if miss in doGet', () => {
+    it('should return document title and markdown and NOT write to cache if miss in doGet', () => {
       const fileId = 'valid-id';
       const mockParentsIterator = {
         hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
@@ -319,35 +304,8 @@ describe('Code.js', () => {
       expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
-      expect(mockProps.setProperty).toHaveBeenCalledWith(fileId, expect.any(String));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})を生成し、プロパティに保存しました`));
-    });
-
-    it('should handle setProperty error when writing the document in doGet', () => {
-      const fileId = 'valid-id';
-      const mockParentsIterator = {
-        hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
-        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
-      };
-      const mockFile = {
-        getMimeType: () => mockMimeType.GOOGLE_DOCS,
-        getParents: () => mockParentsIterator,
-        getName: () => 'Valid Doc',
-      };
-      mockDriveApp.getFileById.mockReturnValue(mockFile);
-      mockDocumentApp.openById.mockReturnValue({
-        getName: () => 'Valid Doc',
-        getBody: () => ({ getNumChildren: () => 0 }),
-      });
-      mockProps.getProperty.mockReturnValue(null);
-      mockProps.setProperty.mockImplementation((key) => {
-        if (key === fileId) throw new Error('Set failed');
-      });
-
-      const e = { parameter: { id: fileId } };
-      Code.doGet(e);
-
-      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})の保存に失敗しました: Set failed`));
+      expect(mockCache.put).not.toHaveBeenCalled();
+      expect(global.console.log).not.toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})を生成し、プロパティに保存しました`));
     });
   });
 
