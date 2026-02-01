@@ -28,9 +28,8 @@ The script runs as a Web App.
 Here are the main parts of the code:
 
 - `FOLDER_ID`: The ID of the Google Drive folder where your documents are.
-- `CACHE_SEC`: The duration (in seconds) for which content is stored in the cache.
-- `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It caches the list of documents and the content of the top 10 documents to improve API performance.
-- `doGet(e)`: This is the main function for the Web API. It retrieves content from the cache if available; otherwise, it fetches the data directly. It decides to either list files or convert a file based on the `id` parameter.
+- `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It saves the list of documents and the content of the top 10 documents to script properties to improve API performance.
+- `doGet(e)`: This is the main function for the Web API. It retrieves content from script properties if available; otherwise, it fetches the data directly and saves it to properties for future use. It decides to either list files or convert a file based on the `id` parameter.
 - `listDocIdsSortedByName_`: This function finds all Google Docs in your folder and sorts them by their names.
 - `getDocInfoInFolder_`: Verifies if a document exists within the specified folder and retrieves its metadata.
 - `docBodyToMarkdown_`: This is the main engine. It reads the Google Doc and turns it into Markdown text.
@@ -59,7 +58,7 @@ Here are the main parts of the code:
    ```
    This pushes the code to your Google Apps Script project.
 4. **Set up Trigger**:
-   To enable caching, you must set up a time-driven trigger in the Google Apps Script editor:
+   To pre-populate the script properties, you should set up a time-driven trigger in the Google Apps Script editor:
    - Go to **Triggers** (clock icon on the left).
    - Click **Add Trigger**.
    - Select `preCacheAll` as the function to run.
