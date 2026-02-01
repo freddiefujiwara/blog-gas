@@ -79,6 +79,20 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
     });
 
+    it('should handle null e or e.parameter', () => {
+      const mockIterator = { hasNext: () => false };
+      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet(null);
+      expect(mockContentService.createTextOutput).toHaveBeenCalled();
+
+      Code.doGet({});
+      expect(mockContentService.createTextOutput).toHaveBeenCalled();
+    });
+
     it('should return an error when the provided ID does not exist in the folder', () => {
       const mockIterator = {
         hasNext: () => false,
@@ -121,6 +135,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'Hello World',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }),
@@ -145,8 +160,37 @@ describe('Code.js', () => {
     });
   });
 
+  describe('Folder Helpers', () => {
+    describe('existsInFolder_', () => {
+      it('should return false if the file is not found after iterating', () => {
+        const mockFiles = [
+          { getId: () => 'other1' },
+          { getId: () => 'other2' },
+        ];
+        let index = 0;
+        const mockIterator = {
+          hasNext: () => index < mockFiles.length,
+          next: () => mockFiles[index++],
+        };
+        const mockFolder = {
+          getFilesByType: vi.fn().mockReturnValue(mockIterator),
+        };
+        mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+        expect(Code.existsInFolder_('folderId', 'missingId')).toBe(false);
+      });
+    });
+  });
+
   describe('Markdown Conversion Helpers', () => {
     describe('paragraphToMarkdown_', () => {
+      it('should return empty string for empty text', () => {
+        const mockP = {
+          getNumChildren: () => 0,
+        };
+        expect(Code.paragraphToMarkdown_(mockP)).toBe('');
+      });
+
       it('should handle headings', () => {
         const mockP = {
           getHeading: () => mockDocumentApp.ParagraphHeading.HEADING1,
@@ -155,6 +199,7 @@ describe('Code.js', () => {
             getType: () => mockDocumentApp.ElementType.TEXT,
             asText: () => ({
               getText: () => 'Heading',
+              getTextAttributeIndices: () => [0],
               getAttributes: () => ({}),
             }),
           }),
@@ -197,21 +242,15 @@ describe('Code.js', () => {
       });
     });
 
-    describe('sameTextAttrs_', () => {
-      it('should return true if bold, italic, and link_url are same', () => {
-        const a = { [mockDocumentApp.Attribute.BOLD]: true, [mockDocumentApp.Attribute.ITALIC]: false, [mockDocumentApp.Attribute.LINK_URL]: null };
-        const b = { [mockDocumentApp.Attribute.BOLD]: true, [mockDocumentApp.Attribute.ITALIC]: false, [mockDocumentApp.Attribute.LINK_URL]: null };
-        expect(Code.sameTextAttrs_(a, b)).toBe(true);
-      });
-
-      it('should return false if any of them are different', () => {
-        const a = { [mockDocumentApp.Attribute.BOLD]: true };
-        const b = { [mockDocumentApp.Attribute.BOLD]: false };
-        expect(Code.sameTextAttrs_(a, b)).toBe(false);
-      });
-    });
 
     describe('listItemToMarkdown_', () => {
+      it('should return empty string for empty text', () => {
+        const mockLi = {
+          getNumChildren: () => 0,
+        };
+        expect(Code.listItemToMarkdown_(mockLi)).toBe('');
+      });
+
       it('should return correctly indented and bulleted markdown', () => {
         const mockLi = {
           getNumChildren: () => 1,
@@ -219,6 +258,7 @@ describe('Code.js', () => {
             getType: () => mockDocumentApp.ElementType.TEXT,
             asText: () => ({
               getText: () => 'Item 1',
+              getTextAttributeIndices: () => [0],
               getAttributes: () => ({}),
             }),
           }),
@@ -254,6 +294,33 @@ describe('Code.js', () => {
         expect(Code.tableToMarkdown_(mockTable)).toBe(expected);
       });
 
+      it('should handle rows with different column counts by padding with empty cells', () => {
+        const mockCell1 = { getText: () => 'H1' };
+        const mockCell2 = { getText: () => 'H2' };
+        const mockCell3 = { getText: () => 'D1' };
+
+        const mockRow1 = { getNumCells: () => 2, getCell: (i) => [mockCell1, mockCell2][i] };
+        const mockRow2 = { getNumCells: () => 1, getCell: (i) => [mockCell3][i] };
+
+        const mockTable = {
+          getNumRows: () => 2,
+          getRow: (i) => [mockRow1, mockRow2][i],
+        };
+
+        const expected = '| H1 | H2 |\n| --- | --- |\n| D1 |  |\n\n';
+        expect(Code.tableToMarkdown_(mockTable)).toBe(expected);
+      });
+
+      it('should handle null cell text', () => {
+        const mockCell = { getText: () => null };
+        const mockRow = { getNumCells: () => 1, getCell: () => mockCell };
+        const mockTable = {
+          getNumRows: () => 1,
+          getRow: () => mockRow,
+        };
+        expect(Code.tableToMarkdown_(mockTable)).toContain('|  |');
+      });
+
       it('should return empty string for 0 rows', () => {
         const mockTable = { getNumRows: () => 0 };
         expect(Code.tableToMarkdown_(mockTable)).toBe('');
@@ -270,6 +337,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'item',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }),
@@ -306,6 +374,18 @@ describe('Code.js', () => {
           getText: () => 'Fallback text',
         };
         expect(Code.elementToMarkdown_(mockEl)).toBe('Fallback text\n');
+
+        const mockElEmpty = {
+          getType: () => 'UNKNOWN',
+          getText: () => ' ',
+        };
+        expect(Code.elementToMarkdown_(mockElEmpty)).toBe('');
+
+        const mockElNull = {
+          getType: () => 'UNKNOWN',
+          getText: () => null,
+        };
+        expect(Code.elementToMarkdown_(mockElNull)).toBe('');
       });
 
       it('should return empty string for unknown element without text', () => {
@@ -324,6 +404,7 @@ describe('Code.js', () => {
               getType: () => mockDocumentApp.ElementType.TEXT,
               asText: () => ({
                 getText: () => 'text',
+                getTextAttributeIndices: () => [0],
                 getAttributes: () => ({}),
               }),
             }
@@ -337,6 +418,7 @@ describe('Code.js', () => {
           getType: () => mockDocumentApp.ElementType.TEXT,
           asText: () => ({
             getText: () => 'bold italic link',
+            getTextAttributeIndices: () => [0, 4, 11],
             getAttributes: (i) => {
               if (i < 4) return { [mockDocumentApp.Attribute.BOLD]: true };
               if (i < 11) return { [mockDocumentApp.Attribute.ITALIC]: true };
@@ -350,15 +432,128 @@ describe('Code.js', () => {
           getChild: () => mockText,
         };
 
-        // 'bold' (0-4), ' italic' (4-11), ' link' (11-16)
-        // Wait, sameTextAttrs_ checks BOLD, ITALIC, LINK_URL.
-        // The loop in paragraphTextWithInlineStyles_ will split at 4, 11, 16.
-        // 0-4: 'bold' -> **bold**
-        // 4-11: ' italic' -> * italic*
-        // 11-16: ' link' -> [ link](http://example.com)
-
         const result = Code.paragraphTextWithInlineStyles_(mockP);
         expect(result).toBe('**bold*** italic*[ link](http://example.com)');
+      });
+
+      it('should handle combined bold and italic', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'bolditalic',
+            getTextAttributeIndices: () => [0],
+            getAttributes: () => ({
+              [mockDocumentApp.Attribute.BOLD]: true,
+              [mockDocumentApp.Attribute.ITALIC]: true,
+            }),
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        const result = Code.paragraphTextWithInlineStyles_(mockP);
+        expect(result).toBe('***bolditalic***');
+      });
+
+      it('should handle empty text element', () => {
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({
+              getText: () => '',
+            }),
+          }),
+        };
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('');
+      });
+
+      it('should handle null attribute indices and boundary adjustments', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'test',
+            getTextAttributeIndices: () => null, // triggers || []
+            getAttributes: () => ({ [mockDocumentApp.Attribute.BOLD]: true }),
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        // indices will become [0, 4]
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('**test**');
+      });
+
+      it('should handle indices not starting at 0 or ending at length', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'ab cd',
+            getTextAttributeIndices: () => [2], // 2 is ' '
+            getAttributes: (i) => {
+              if (i < 2) return { [mockDocumentApp.Attribute.BOLD]: true };
+              return {};
+            },
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        // indices: [2] -> [0, 2, 5]
+        // 0-2: 'ab' (bold) -> **ab**
+        // 2-5: ' cd' (normal) -> ' cd'
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('**ab** cd');
+      });
+
+      it('should skip segments where start >= end or chunk is empty', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'abc',
+            getTextAttributeIndices: () => [0, 0, 3], // duplicates trigger start >= end logic if any
+            getAttributes: () => ({}),
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        // indices: [0, 0, 3] -> [0, 0, 3]
+        // k=0: start=0, end=0 -> skip (start >= end)
+        // k=1: start=0, end=3 -> 'abc'
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('abc');
+      });
+
+      it('should skip empty chunks', () => {
+        // To hit if (!chunk) continue; at line 221
+        // We need substring to return empty string when start < end.
+        // This is only possible if we mock substring on the string object.
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => ({
+              substring: () => '', // ALWAYS return empty
+              length: 3,
+              replace: () => '',
+              [Symbol.toPrimitive]: () => 'abc'
+            }),
+            getTextAttributeIndices: () => [0, 3],
+            getAttributes: () => ({}),
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('');
       });
     });
   });
