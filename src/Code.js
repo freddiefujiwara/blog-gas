@@ -18,7 +18,7 @@ export function preCacheAll() {
   try {
     if (listPayload.length < CACHE_SIZE_LIMIT) {
       cache.put("0", listPayload, CACHE_TTL);
-      log_("一覧を保存しました");
+      console.log("一覧を保存しました");
     }
   } catch (e) {
     console.error("一覧の保存失敗: " + e.message);
@@ -37,7 +37,7 @@ export function preCacheAll() {
 
       if (payload.length < CACHE_SIZE_LIMIT) {
         cache.put(docId, payload, CACHE_TTL);
-        log_(`保存完了: ${doc.getName()}`);
+        console.log(`保存完了: ${doc.getName()}`);
       }
     } catch (e) {
       console.error(`ID:${docId} の保存失敗: ${e.message}`);
