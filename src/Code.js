@@ -1,4 +1,6 @@
 export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+// Google Apps ScriptのContentServiceはカスタムヘッダーをサポートしていないため、
+// この値はフロントエンドやプロキシでのキャッシュ制御の参考値として定義しています。
 export const BROWSER_CACHE_TIME = 60;
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
@@ -59,7 +61,7 @@ export function doGet(e) {
     const cachedList = cache.get("0");
     if (cachedList) {
       log_("一覧をキャッシュから取得しました");
-      return ContentService.createTextOutput(cachedList)
+      return withHeaders_(ContentService.createTextOutput(cachedList))
         .setMimeType(ContentService.MimeType.JSON)
         .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
     }
@@ -73,7 +75,7 @@ export function doGet(e) {
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
     log_(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
-    return ContentService.createTextOutput(cachedDoc)
+    return withHeaders_(ContentService.createTextOutput(cachedDoc))
       .setMimeType(ContentService.MimeType.JSON)
       .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
   }
@@ -340,9 +342,23 @@ export function escapeMdTable_(s) {
 /** -----------------------------
  *  JSON helpers
  *  ----------------------------- */
+/**
+ * ContentService.TextOutput に setHeader メソッドを追加する（ポリフィル）
+ * Google Apps Script の純正環境ではヘッダー設定がサポートされていないため、
+ * エラー防止と将来的なプロキシ対応のための拡張です。
+ */
+export function withHeaders_(output) {
+  if (typeof output.setHeader !== 'function') {
+    output.setHeader = function(name, value) {
+      console.warn(`setHeader(${name}, ${value}) は現在の環境ではサポートされていませんが、無視されました。`);
+      return this;
+    };
+  }
+  return output;
+}
+
 export function json_(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
+  return withHeaders_(ContentService.createTextOutput(JSON.stringify(obj)))
     .setMimeType(ContentService.MimeType.JSON)
     .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
 }

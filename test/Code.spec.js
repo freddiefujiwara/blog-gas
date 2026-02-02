@@ -75,6 +75,7 @@ global.MimeType = mockMimeType;
 global.console = {
   log: vi.fn(),
   error: vi.fn(),
+  warn: vi.fn(),
 };
 
 describe('Code.js', () => {
@@ -195,6 +196,26 @@ describe('Code.js', () => {
     });
   });
 
+  describe('withHeaders_ polyfill', () => {
+    it('should add setHeader if it does not exist and it should work', () => {
+      const mockOutput = { some: 'property' };
+      const result = Code.withHeaders_(mockOutput);
+      expect(result.setHeader).toBeDefined();
+      expect(typeof result.setHeader).toBe('function');
+
+      const returned = result.setHeader('X-Test', 'Value');
+      expect(returned).toBe(result);
+      expect(global.console.warn).toHaveBeenCalledWith(expect.stringContaining('X-Test'));
+    });
+
+    it('should not overwrite existing setHeader', () => {
+      const originalSetHeader = () => {};
+      const mockOutput = { setHeader: originalSetHeader };
+      const result = Code.withHeaders_(mockOutput);
+      expect(result.setHeader).toBe(originalSetHeader);
+    });
+  });
+
   describe('doGet', () => {
     it('should return a list of doc IDs from cache if available and log it', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
@@ -306,6 +327,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
+      expect(mockTextOutput.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60');
     });
 
     it('should return document title and markdown and NOT write to cache if miss in doGet', () => {
