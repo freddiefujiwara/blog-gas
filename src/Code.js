@@ -3,28 +3,28 @@ export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 
 /**
- * 【バッチ処理】定期的に実行してプロパティを更新
+ * [Batch Process] Run periodically to update properties
  */
 export function preCacheAll() {
-  // --- 【お掃除】ここを追加 ---
+  // --- [Cleanup] Added here ---
   PropertiesService.getScriptProperties().deleteProperty('DEBUG_LOGS');
-  console.log("ログを掃除しました");
+  console.log("Logs cleared");
 
   const cache = CacheService.getScriptCache();
 
-  // 1. 全ID一覧を取得して保存（キー: "0"）
+  // 1. Get list of all IDs and save (Key: "0")
   const allIds = listDocIdsSortedByName_(FOLDER_ID);
   const listPayload = JSON.stringify(allIds);
   try {
     if (listPayload.length < CACHE_SIZE_LIMIT) {
       cache.put("0", listPayload, CACHE_TTL);
-      console.log("一覧を保存しました");
+      console.log("List saved");
     }
   } catch (e) {
-    console.error("一覧の保存失敗: " + e.message);
+    console.error("Failed to save list: " + e.message);
   }
 
-  // 2. 先頭10件の内容を保存
+  // 2. Save content of first 10 items
   const targetIds = allIds.slice(0, 10);
   targetIds.forEach(docId => {
     try {
@@ -37,44 +37,44 @@ export function preCacheAll() {
 
       if (payload.length < CACHE_SIZE_LIMIT) {
         cache.put(docId, payload, CACHE_TTL);
-        console.log(`保存完了: ${doc.getName()}`);
+        console.log(`Saved: ${doc.getName()}`);
       }
     } catch (e) {
-      console.error(`ID:${docId} の保存失敗: ${e.message}`);
+      console.error(`Failed to save ID:${docId}: ${e.message}`);
     }
   });
 }
 
 /**
- * 【Web API】
- * キャッシュがあればそれを返し、なければその場で生成する（doGet内ではputしない）
+ * [Web API]
+ * Return cache if exists, otherwise generate on the fly (no put in doGet)
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
   const cache = CacheService.getScriptCache();
 
-  // --- パターンA: ID未指定（一覧取得） ---
+  // --- Case A: No ID (Get list) ---
   if (!docId) {
     const cachedList = cache.get("0");
     if (cachedList) {
-      log_("一覧をキャッシュから取得しました");
+      log_("List retrieved from cache");
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
-    // キャッシュがない場合はその場で計算する（保存はしない）
-    log_("一覧がキャッシュにありません。Driveから取得します");
+    // Calculate on the fly if not in cache (no save)
+    log_("List not in cache. Getting from Drive");
     const allIds = listDocIdsSortedByName_(FOLDER_ID);
     return json_(allIds);
   }
 
-  // --- パターンB: ID指定（ドキュメント取得） ---
+  // --- Case B: ID specified (Get document) ---
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
-    log_(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
+    log_(`Document (ID:${docId}) retrieved from cache`);
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // キャッシュにない場合: その場で生成する（保存はしない）
-  log_(`ドキュメント(ID:${docId})がキャッシュにありません。生成します`);
+  // If not in cache: generate on the fly (no save)
+  log_(`Document (ID:${docId}) not in cache. Generating...`);
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
 
@@ -106,8 +106,8 @@ export function listDocIdsSortedByName_(folderId) {
 }
 
 /**
- * 指定フォルダ内に該当Docが存在するか確認し、情報を返す
- * 高速化：全ファイル走査(O(N))を避け、ファイルの親フォルダを確認(O(Parents))する
+ * Check if Doc exists in folder and return info.
+ * Fast: Check parents (O(Parents)) instead of full scan (O(N)).
  */
 export function getDocInfoInFolder_(folderId, fileId) {
   try {
@@ -122,7 +122,7 @@ export function getDocInfoInFolder_(folderId, fileId) {
       }
     }
   } catch (e) {
-    // 指定IDが存在しない、またはアクセス権がない場合
+    // Case: ID does not exist or no access
   }
   return { exists: false };
 }
@@ -140,7 +140,7 @@ export function docBodyToMarkdown_(doc) {
     out.push(elementToMarkdown_(el));
   }
 
-  // 空行の連続をほどほどに圧縮
+  // Compress multiple empty lines
   return out
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -150,7 +150,7 @@ export function docBodyToMarkdown_(doc) {
 export function elementToMarkdown_(el) {
   const t = el.getType();
 
-  // ディスパッチテーブルを使用して条件分岐を高速化
+  // Use dispatch table for faster branching
   const converters = {
     [DocumentApp.ElementType.PARAGRAPH]: (e) => paragraphToMarkdown_(e.asParagraph()),
     [DocumentApp.ElementType.LIST_ITEM]: (e) => listItemToMarkdown_(e.asListItem()),
@@ -163,7 +163,7 @@ export function elementToMarkdown_(el) {
     return converter(el);
   }
 
-  // それ以外は無理に変換せずテキスト化
+  // Otherwise, convert to text without styling
   if (el.getText) {
     const text = (el.getText() || '').trim();
     return text ? text + '\n' : '';
@@ -193,7 +193,7 @@ export function listItemToMarkdown_(li) {
   const level = li.getNestingLevel();
   const indent = '  '.repeat(level);
 
-  // 番号付きかどうか（GlyphTypeでざっくり判定）
+  // Check if ordered (simple check via GlyphType)
   const glyph = li.getGlyphType();
   const isOrdered = isOrderedGlyph_(glyph);
 
@@ -202,7 +202,7 @@ export function listItemToMarkdown_(li) {
 }
 
 export function tableToMarkdown_(table) {
-  // 簡易：1行目をヘッダとしてMarkdown表にする（ヘッダが不要ならここ変えてOK）
+  // Simple: Use 1st row as header (Change if not needed)
   const numRows = table.getNumRows();
   if (numRows === 0) return '';
 
@@ -219,7 +219,7 @@ export function tableToMarkdown_(table) {
     matrix.push(cells);
   }
 
-  // 列数を最大に合わせる
+  // Match column count to maximum
   const maxCols = matrix.reduce((m, a) => Math.max(m, a.length), 0);
   matrix.forEach(a => {
     while (a.length < maxCols) a.push('');
@@ -252,16 +252,16 @@ export function headingToPrefix_(heading) {
 }
 
 export function isOrderedGlyph_(glyphType) {
-  // orderedっぽいものを広めに拾う（Docsの環境/言語で揺れるので防御的に）
+  // Catch things that look ordered (defensively for Docs environments)
   const s = String(glyphType);
   return /NUMBER|LATIN|ROMAN|ALPHA/i.test(s);
 }
 
 /**
- * 段落内の太字/斜体/リンクをMarkdown化（高速・堅牢版）
- * 改良点：
- * - 属性境界（indices）の取得を効率化し、空配列等のエッジケースをケア
- * - 文字列結合を配列（out.push/join）に集約し、長文でのメモリ効率を最適化
+ * Convert bold/italic/links in paragraph to Markdown (Fast/Robust version)
+ * Improvements:
+ * - Efficient boundary (indices) retrieval with edge case handling
+ * - Use array join for string concatenation to optimize memory efficiency
  */
 export function paragraphTextWithInlineStyles_(p) {
   const out = [];
@@ -276,10 +276,10 @@ export function paragraphTextWithInlineStyles_(p) {
     const fullText = textEl.getText();
     if (!fullText) continue;
 
-    // スタイル境界を取得（無ければ空配列で初期化）
+    // Get style boundaries (initialize with empty array if none)
     let indices = textEl.getTextAttributeIndices() || [];
 
-    // 0 と末尾の境界を保証
+    // Ensure 0 and end boundaries
     if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
     if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
 
@@ -291,17 +291,17 @@ export function paragraphTextWithInlineStyles_(p) {
       let chunk = fullText.substring(start, end);
       if (!chunk) continue;
 
-      // 属性取得とフラグ変換
-      // getAttributes(start)の結果から属性を抽出し、定数参照を最小限にする
+      // Get attributes and convert to flags
+      // Extract from getAttributes(start) to minimize constant lookups
       const attrs = textEl.getAttributes(start);
       const link = attrs[LINK_URL];
       const bold = !!attrs[BOLD];
       const italic = !!attrs[ITALIC];
 
-      // 特殊文字エスケープと改行正規化
+      // Escape special characters and normalize newlines
       chunk = escapeMdInline_(chunk.replace(/\r/g, ''));
 
-      // Markdown変換ロジック
+      // Markdown conversion logic
       if (link) {
         chunk = `[${chunk}](${link})`;
       } else if (bold && italic) {
@@ -320,15 +320,14 @@ export function paragraphTextWithInlineStyles_(p) {
 }
 
 export function escapeMdInline_(s) {
-  // 最低限：` * _ [ ] をエスケープ（リンク部分は [] に入るので過剰エスケープ注意）
-  // ここは“強すぎない”程度にしています
+  // Minimal: Escape \ and `
   return s
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`');
 }
 
 export function escapeMdTable_(s) {
-  // Markdown表の区切り文字を壊さないように
+  // Do not break Markdown table separator
   return s.replace(/\|/g, '\\|');
 }
 
@@ -346,31 +345,31 @@ export function jsonError_(message) {
 }
 
 /**
- * 簡易ログをスクリプトプロパティに追記
- * @param {any} msg ログメッセージ
+ * Append simple log to script property
+ * @param {any} msg log message
  */
 export function saveLog_(msg) {
   try {
     const props = PropertiesService.getScriptProperties();
     const now = Utilities.formatDate(new Date(), "JST", "MM/dd HH:mm:ss");
 
-    // msg は文字列以外も来る可能性があるため安全に文字列化
+    // msg might not be a string, so stringify safely
     const logMsg = (typeof msg === 'object') ? JSON.stringify(msg) : String(msg);
 
     const currentLogs = props.getProperty('DEBUG_LOGS') || "";
     const newLogs = currentLogs + `[${now}] ${logMsg}\n`;
 
-    // 9KB（プロパティの上限は約9KB）を超えない範囲で保存
+    // Save within 9KB (Script property limit)
     props.setProperty('DEBUG_LOGS', newLogs.slice(-9000));
   } catch (e) {
-    // ログ記録自体の失敗で本体が止まらないようにする
+    // Ensure log failure does not stop main process
     console.error("saveLog_ error: " + e.message);
   }
 }
 
 /**
- * console.log と saveLog_ を同時に実行するラッパー
- * @param {any} msg ログメッセージ
+ * Wrapper to run console.log and saveLog_ together
+ * @param {any} msg log message
  */
 export function log_(msg) {
   console.log(msg);

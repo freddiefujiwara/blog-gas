@@ -91,7 +91,7 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockProperties.deleteProperty).toHaveBeenCalledWith('DEBUG_LOGS');
-      expect(global.console.log).toHaveBeenCalledWith("ログを掃除しました");
+      expect(global.console.log).toHaveBeenCalledWith("Logs cleared");
     });
 
     it('should save the list and the first 10 documents', () => {
@@ -139,7 +139,7 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('一覧の保存失敗: List put failed'));
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to save list: List put failed'));
     });
 
     it('should handle errors during document saving in preCacheAll', () => {
@@ -160,7 +160,7 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('ID:fail-id の保存失敗: Open failed'));
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to save ID:fail-id: Open failed'));
     });
 
     it('should not save if payload is too large', () => {
@@ -198,7 +198,9 @@ describe('Code.js', () => {
   describe('doGet', () => {
     it('should return a list of doc IDs from cache if available and log it', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
       mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
@@ -206,8 +208,8 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
-      expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
-      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining("一覧をキャッシュから取得しました"));
+      expect(global.console.log).toHaveBeenCalledWith("List retrieved from cache");
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining("List retrieved from cache"));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
     });
 
@@ -227,14 +229,16 @@ describe('Code.js', () => {
       };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: {} };
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
-      expect(global.console.log).toHaveBeenCalledWith("一覧がキャッシュにありません。Driveから取得します");
+      expect(global.console.log).toHaveBeenCalledWith("List not in cache. Getting from Drive");
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
       expect(mockCache.put).not.toHaveBeenCalled();
     });
@@ -244,7 +248,9 @@ describe('Code.js', () => {
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       Code.doGet(null);
@@ -262,7 +268,9 @@ describe('Code.js', () => {
         return null;
       });
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
       mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
@@ -270,8 +278,8 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith(docId);
-      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
-      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining(`ドキュメント(ID:${docId})をキャッシュから取得しました`));
+      expect(global.console.log).toHaveBeenCalledWith(`Document (ID:${docId}) retrieved from cache`);
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining(`Document (ID:${docId}) retrieved from cache`));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
     });
 
@@ -281,7 +289,9 @@ describe('Code.js', () => {
         throw new Error('Not found');
       });
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: { id: 'non-existent' } };
@@ -327,18 +337,20 @@ describe('Code.js', () => {
       };
       mockDocumentApp.openById.mockReturnValue(mockDoc);
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: { id: fileId } };
       Code.doGet(e);
 
       expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
-      expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${fileId})がキャッシュにありません。生成します`);
+      expect(global.console.log).toHaveBeenCalledWith(`Document (ID:${fileId}) not in cache. Generating...`);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
       expect(mockCache.put).not.toHaveBeenCalled();
-      expect(global.console.log).not.toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})を生成し、プロパティに保存しました`));
+      expect(global.console.log).not.toHaveBeenCalledWith(expect.stringContaining(`Document (ID:${fileId}) generated and saved to property`));
     });
   });
 
