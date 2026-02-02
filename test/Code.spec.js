@@ -21,6 +21,20 @@ const mockDriveApp = {
   getFileById: vi.fn(),
 };
 
+const mockProperties = {
+  getProperty: vi.fn(),
+  setProperty: vi.fn(),
+  deleteProperty: vi.fn(),
+};
+
+const mockPropertiesService = {
+  getScriptProperties: vi.fn().mockReturnValue(mockProperties),
+};
+
+const mockUtilities = {
+  formatDate: vi.fn(),
+};
+
 const mockDocumentApp = {
   openById: vi.fn(),
   ElementType: {
@@ -55,6 +69,8 @@ global.CacheService = mockCacheService;
 global.ContentService = mockContentService;
 global.DriveApp = mockDriveApp;
 global.DocumentApp = mockDocumentApp;
+global.PropertiesService = mockPropertiesService;
+global.Utilities = mockUtilities;
 global.MimeType = mockMimeType;
 global.console = {
   log: vi.fn(),
@@ -67,6 +83,17 @@ describe('Code.js', () => {
   });
 
   describe('preCacheAll', () => {
+    it('should clear DEBUG_LOGS at the start', () => {
+      const mockIterator = { hasNext: () => false };
+      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      Code.preCacheAll();
+
+      expect(mockProperties.deleteProperty).toHaveBeenCalledWith('DEBUG_LOGS');
+      expect(global.console.log).toHaveBeenCalledWith("ログを掃除しました");
+    });
+
     it('should save the list and the first 10 documents', () => {
       const mockFiles = [];
       for (let i = 0; i < 12; i++) {
@@ -173,12 +200,14 @@ describe('Code.js', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+      mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
       const e = { parameter: {} };
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
       expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining("一覧をキャッシュから取得しました"));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
     });
 
@@ -235,12 +264,14 @@ describe('Code.js', () => {
 
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+      mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
       const e = { parameter: { id: docId } };
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith(docId);
       expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining(`ドキュメント(ID:${docId})をキャッシュから取得しました`));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
     });
 
@@ -721,6 +752,62 @@ describe('Code.js', () => {
 
         expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('');
       });
+    });
+  });
+  describe('saveLog_', () => {
+    it('should save logs with timestamp and handle empty existing logs', () => {
+      mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
+      mockProperties.getProperty.mockReturnValue(null);
+
+      Code.saveLog_('test message');
+
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', '[01/01 12:00:00] test message\n');
+    });
+
+    it('should append logs to existing ones', () => {
+      mockUtilities.formatDate.mockReturnValue('01/01 12:01:00');
+      mockProperties.getProperty.mockReturnValue('[01/01 12:00:00] old message\n');
+
+      Code.saveLog_('new message');
+
+      expect(mockProperties.setProperty).toHaveBeenCalledWith(
+        'DEBUG_LOGS',
+        '[01/01 12:00:00] old message\n[01/01 12:01:00] new message\n'
+      );
+    });
+
+    it('should truncate logs to 9000 characters from the end', () => {
+      mockUtilities.formatDate.mockReturnValue('01/01 12:02:00');
+      const longLog = 'a'.repeat(9500);
+      mockProperties.getProperty.mockReturnValue(longLog);
+
+      Code.saveLog_('latest');
+
+      const expectedFull = longLog + '[01/01 12:02:00] latest\n';
+      const expectedSaved = expectedFull.slice(-9000);
+
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expectedSaved);
+      expect(expectedSaved.length).toBe(9000);
+    });
+
+    it('should handle non-string messages by stringifying or converting them', () => {
+      mockUtilities.formatDate.mockReturnValue('01/01 12:03:00');
+      mockProperties.getProperty.mockReturnValue('');
+
+      Code.saveLog_({ key: 'value' });
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining('{"key":"value"}'));
+
+      Code.saveLog_(null);
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining('null'));
+    });
+
+    it('should not throw even if PropertiesService fails', () => {
+      mockProperties.getProperty.mockImplementation(() => {
+        throw new Error('Storage Full');
+      });
+
+      expect(() => Code.saveLog_('boom')).not.toThrow();
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('saveLog_ error: Storage Full'));
     });
   });
 });

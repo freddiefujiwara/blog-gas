@@ -6,6 +6,10 @@ export const CACHE_SIZE_LIMIT = 100000;
  * 【バッチ処理】定期的に実行してプロパティを更新
  */
 export function preCacheAll() {
+  // --- 【お掃除】ここを追加 ---
+  PropertiesService.getScriptProperties().deleteProperty('DEBUG_LOGS');
+  console.log("ログを掃除しました");
+
   const cache = CacheService.getScriptCache();
 
   // 1. 全ID一覧を取得して保存（キー: "0"）
@@ -14,7 +18,7 @@ export function preCacheAll() {
   try {
     if (listPayload.length < CACHE_SIZE_LIMIT) {
       cache.put("0", listPayload, CACHE_TTL);
-      console.log("一覧を保存しました");
+      log_("一覧を保存しました");
     }
   } catch (e) {
     console.error("一覧の保存失敗: " + e.message);
@@ -33,7 +37,7 @@ export function preCacheAll() {
 
       if (payload.length < CACHE_SIZE_LIMIT) {
         cache.put(docId, payload, CACHE_TTL);
-        console.log(`保存完了: ${doc.getName()}`);
+        log_(`保存完了: ${doc.getName()}`);
       }
     } catch (e) {
       console.error(`ID:${docId} の保存失敗: ${e.message}`);
@@ -53,11 +57,11 @@ export function doGet(e) {
   if (!docId) {
     const cachedList = cache.get("0");
     if (cachedList) {
-      console.log("一覧をキャッシュから取得しました");
+      log_("一覧をキャッシュから取得しました");
       return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
     }
     // キャッシュがない場合はその場で計算する（保存はしない）
-    console.log("一覧がキャッシュにありません。Driveから取得します");
+    log_("一覧がキャッシュにありません。Driveから取得します");
     const allIds = listDocIdsSortedByName_(FOLDER_ID);
     return json_(allIds);
   }
@@ -65,12 +69,12 @@ export function doGet(e) {
   // --- パターンB: ID指定（ドキュメント取得） ---
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
-    console.log(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
+    log_(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 
   // キャッシュにない場合: その場で生成する（保存はしない）
-  console.log(`ドキュメント(ID:${docId})がキャッシュにありません。生成します`);
+  log_(`ドキュメント(ID:${docId})がキャッシュにありません。生成します`);
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
 
@@ -339,4 +343,36 @@ export function json_(obj) {
 
 export function jsonError_(message) {
   return json_({ error: message });
+}
+
+/**
+ * 簡易ログをスクリプトプロパティに追記
+ * @param {any} msg ログメッセージ
+ */
+export function saveLog_(msg) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const now = Utilities.formatDate(new Date(), "JST", "MM/dd HH:mm:ss");
+
+    // msg は文字列以外も来る可能性があるため安全に文字列化
+    const logMsg = (typeof msg === 'object') ? JSON.stringify(msg) : String(msg);
+
+    const currentLogs = props.getProperty('DEBUG_LOGS') || "";
+    const newLogs = currentLogs + `[${now}] ${logMsg}\n`;
+
+    // 9KB（プロパティの上限は約9KB）を超えない範囲で保存
+    props.setProperty('DEBUG_LOGS', newLogs.slice(-9000));
+  } catch (e) {
+    // ログ記録自体の失敗で本体が止まらないようにする
+    console.error("saveLog_ error: " + e.message);
+  }
+}
+
+/**
+ * console.log と saveLog_ を同時に実行するラッパー
+ * @param {any} msg ログメッセージ
+ */
+export function log_(msg) {
+  console.log(msg);
+  saveLog_(msg);
 }
