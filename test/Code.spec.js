@@ -227,7 +227,7 @@ describe('Code.js', () => {
       }));
     });
 
-    it('should fetch list and articles from Drive/Docs on cache miss and save to cache', () => {
+    it('should fetch list and articles from Drive/Docs on cache miss (but NOT save to cache)', () => {
       mockCache.get.mockReturnValue(null);
       mockCache.getAll.mockReturnValue({});
 
@@ -273,8 +273,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
-      expect(mockCache.put).toHaveBeenCalledWith('0', JSON.stringify(['id1']), Code.CACHE_TTL);
-      expect(mockCache.put).toHaveBeenCalledWith('id1', expect.stringContaining('"title":"Doc 1"'), Code.CACHE_TTL);
+      expect(mockCache.put).not.toHaveBeenCalled();
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
     });
 
@@ -314,21 +313,6 @@ describe('Code.js', () => {
       expect(response.article_cache[0].id).toBe('id2');
     });
 
-    it('should handle cache put errors gracefully', () => {
-      mockCache.get.mockReturnValue(null);
-      mockCache.put.mockImplementation(() => { throw new Error('Quota exceeded'); });
-
-      const mockIterator = { hasNext: () => false };
-      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
-      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
-
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
-      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
-
-      Code.doGet({});
-
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Failed to cache list: Quota exceeded'));
-    });
 
     it('should handle null e or e.parameter', () => {
       mockCache.get.mockReturnValue(JSON.stringify([]));
@@ -382,7 +366,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
-    it('should fetch, save to cache, and return document when ID is specified but not in cache', () => {
+    it('should fetch and return document when ID is specified but not in cache (but NOT save to cache)', () => {
       const fileId = 'valid-id';
       mockCache.get.mockReturnValue(null);
 
@@ -411,31 +395,8 @@ describe('Code.js', () => {
       const e = { parameter: { id: fileId } };
       Code.doGet(e);
 
-      expect(mockCache.put).toHaveBeenCalledWith(fileId, expect.stringContaining('"title":"Valid Doc"'), Code.CACHE_TTL);
+      expect(mockCache.put).not.toHaveBeenCalled();
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
-    });
-
-    it('should handle cache put errors when ID is specified', () => {
-      const fileId = 'valid-id';
-      mockCache.get.mockReturnValue(null);
-      mockCache.put.mockImplementation(() => { throw new Error('Put failed'); });
-
-      mockDriveApp.getFileById.mockReturnValue({
-        getMimeType: () => mockMimeType.GOOGLE_DOCS,
-        getParents: () => ({ hasNext: () => true, next: () => ({ getId: () => Code.FOLDER_ID }) }),
-        getName: () => 'Valid Doc',
-      });
-      mockDocumentApp.openById.mockReturnValue({
-        getName: () => 'Valid Doc',
-        getBody: () => ({ getNumChildren: () => 0 }),
-      });
-
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
-      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
-
-      Code.doGet({ parameter: { id: fileId } });
-
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Failed to cache article valid-id: Put failed'));
     });
   });
 

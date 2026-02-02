@@ -18,10 +18,35 @@ The frontend source code that consumes this API can be found at: https://github.
 
 The script runs as a Web App.
 
-1. **Get List of IDs**:
-   Visit the Web App URL. It will give you a JSON list of all Google Docs in the folder.
-2. **Get Markdown Content**:
-   Visit `WEB_APP_URL?id=YOUR_DOC_ID`. It will give you the title and the Markdown content.
+1. **Get List of IDs and Preloaded Articles**:
+   Visit the Web App URL without any parameters. It returns a JSON object containing all document IDs and the content of the first 10 documents (for faster loading).
+
+   **Response Structure**:
+   ```json
+   {
+     "ids": ["ID1", "ID2", "..."],
+     "article_cache": [
+       {
+         "id": "ID1",
+         "title": "Document Title",
+         "markdown": "Markdown content..."
+       },
+       ... up to 10 items
+     ]
+   }
+   ```
+
+2. **Get Markdown Content for a specific Document**:
+   Visit `WEB_APP_URL?id=YOUR_DOC_ID`. It returns the title and Markdown content for the requested ID.
+
+   **Response Structure**:
+   ```json
+   {
+     "id": "YOUR_DOC_ID",
+     "title": "Document Title",
+     "markdown": "Markdown content..."
+   }
+   ```
 
 ## Code Explanation (`src/Code.js`)
 

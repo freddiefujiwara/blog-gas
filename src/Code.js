@@ -63,14 +63,6 @@ export function doGet(e) {
     } else {
       log_("List not in cache. Getting from Drive");
       allIds = listDocIdsSortedByName_(FOLDER_ID);
-      try {
-        const listPayload = JSON.stringify(allIds);
-        if (listPayload.length < CACHE_SIZE_LIMIT) {
-          cache.put("0", listPayload, CACHE_TTL);
-        }
-      } catch (err) {
-        log_("Failed to cache list: " + err.message);
-      }
     }
 
     const top10Ids = allIds.slice(0, 10);
@@ -92,10 +84,6 @@ export function doGet(e) {
               markdown: docBodyToMarkdown_(doc)
             };
             articleCache.push(article);
-            const articlePayload = JSON.stringify(article);
-            if (articlePayload.length < CACHE_SIZE_LIMIT) {
-              cache.put(id, articlePayload, CACHE_TTL);
-            }
           }
         } catch (err) {
           log_(`Error fetching article ${id}: ${err.message}`);
@@ -127,15 +115,6 @@ export function doGet(e) {
     title: info.name,
     markdown: docBodyToMarkdown_(doc)
   };
-
-  try {
-    const payload = JSON.stringify(result);
-    if (payload.length < CACHE_SIZE_LIMIT) {
-      cache.put(docId, payload, CACHE_TTL);
-    }
-  } catch (err) {
-    log_(`Failed to cache article ${docId}: ${err.message}`);
-  }
 
   return json_(result);
 }
