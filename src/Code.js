@@ -1,4 +1,5 @@
 export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+export const BROWSER_CACHE_TIME = 60;
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 
@@ -58,7 +59,9 @@ export function doGet(e) {
     const cachedList = cache.get("0");
     if (cachedList) {
       log_("一覧をキャッシュから取得しました");
-      return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
+      return ContentService.createTextOutput(cachedList)
+        .setMimeType(ContentService.MimeType.JSON)
+        .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
     }
     // キャッシュがない場合はその場で計算する（保存はしない）
     log_("一覧がキャッシュにありません。Driveから取得します");
@@ -70,7 +73,9 @@ export function doGet(e) {
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
     log_(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
-    return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
+    return ContentService.createTextOutput(cachedDoc)
+      .setMimeType(ContentService.MimeType.JSON)
+      .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
   }
 
   // キャッシュにない場合: その場で生成する（保存はしない）
@@ -338,7 +343,8 @@ export function escapeMdTable_(s) {
 export function json_(obj) {
   return ContentService
     .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+    .setMimeType(ContentService.MimeType.JSON)
+    .setHeader("Cache-Control", `public, max-age=${BROWSER_CACHE_TIME}`);
 }
 
 export function jsonError_(message) {

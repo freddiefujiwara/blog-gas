@@ -198,7 +198,10 @@ describe('Code.js', () => {
   describe('doGet', () => {
     it('should return a list of doc IDs from cache if available and log it', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
       mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
@@ -209,6 +212,7 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("一覧をキャッシュから取得しました");
       expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining("一覧をキャッシュから取得しました"));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
+      expect(mockTextOutput.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60');
     });
 
     it('should return a list of doc IDs from Drive and NOT write to cache if not found', () => {
@@ -227,7 +231,10 @@ describe('Code.js', () => {
       };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: {} };
@@ -237,6 +244,7 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("一覧がキャッシュにありません。Driveから取得します");
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
       expect(mockCache.put).not.toHaveBeenCalled();
+      expect(mockTextOutput.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60');
     });
 
     it('should handle null e or e.parameter', () => {
@@ -244,7 +252,10 @@ describe('Code.js', () => {
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       Code.doGet(null);
@@ -262,7 +273,10 @@ describe('Code.js', () => {
         return null;
       });
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
       mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
@@ -273,6 +287,7 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith(`ドキュメント(ID:${docId})をキャッシュから取得しました`);
       expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining(`ドキュメント(ID:${docId})をキャッシュから取得しました`));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
+      expect(mockTextOutput.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60');
     });
 
     it('should return an error when the provided ID does not exist in the folder and not in cache', () => {
@@ -281,7 +296,10 @@ describe('Code.js', () => {
         throw new Error('Not found');
       });
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: { id: 'non-existent' } };
@@ -327,7 +345,10 @@ describe('Code.js', () => {
       };
       mockDocumentApp.openById.mockReturnValue(mockDoc);
 
-      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+        setHeader: vi.fn().mockReturnThis(),
+      };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
       const e = { parameter: { id: fileId } };
@@ -339,6 +360,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
       expect(mockCache.put).not.toHaveBeenCalled();
       expect(global.console.log).not.toHaveBeenCalledWith(expect.stringContaining(`ドキュメント(ID:${fileId})を生成し、プロパティに保存しました`));
+      expect(mockTextOutput.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=60');
     });
   });
 
