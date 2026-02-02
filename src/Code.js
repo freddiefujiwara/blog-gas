@@ -47,23 +47,54 @@ export function preCacheAll() {
 
 /**
  * [Web API]
- * Return cache if exists, otherwise generate on the fly (no put in doGet)
+ * Return cache if exists, otherwise generate on the fly
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
   const cache = CacheService.getScriptCache();
 
-  // --- Case A: No ID (Get list) ---
+  // --- Case A: No ID (Get list + article_cache) ---
   if (!docId) {
+    let allIds;
     const cachedList = cache.get("0");
     if (cachedList) {
       log_("List retrieved from cache");
-      return ContentService.createTextOutput(cachedList).setMimeType(ContentService.MimeType.JSON);
+      allIds = JSON.parse(cachedList);
+    } else {
+      log_("List not in cache. Getting from Drive");
+      allIds = listDocIdsSortedByName_(FOLDER_ID);
     }
-    // Calculate on the fly if not in cache (no save)
-    log_("List not in cache. Getting from Drive");
-    const allIds = listDocIdsSortedByName_(FOLDER_ID);
-    return json_(allIds);
+
+    const top10Ids = allIds.slice(0, 10);
+    const cachedArticles = cache.getAll(top10Ids);
+    const articleCache = [];
+
+    top10Ids.forEach(id => {
+      if (cachedArticles[id]) {
+        articleCache.push(JSON.parse(cachedArticles[id]));
+      } else {
+        log_(`Article (ID:${id}) not in cache. Fetching...`);
+        try {
+          const info = getDocInfoInFolder_(FOLDER_ID, id);
+          if (info.exists) {
+            const doc = DocumentApp.openById(id);
+            const article = {
+              id: id,
+              title: info.name,
+              markdown: docBodyToMarkdown_(doc)
+            };
+            articleCache.push(article);
+          }
+        } catch (err) {
+          log_(`Error fetching article ${id}: ${err.message}`);
+        }
+      }
+    });
+
+    return json_({
+      ids: allIds,
+      article_cache: articleCache
+    });
   }
 
   // --- Case B: ID specified (Get document) ---
@@ -73,7 +104,7 @@ export function doGet(e) {
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
   }
 
-  // If not in cache: generate on the fly (no save)
+  // If not in cache: generate on the fly
   log_(`Document (ID:${docId}) not in cache. Generating...`);
   const info = getDocInfoInFolder_(FOLDER_ID, docId);
   if (!info.exists) return jsonError_('Document not found');
