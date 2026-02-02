@@ -5,6 +5,7 @@ import * as Code from '../src/Code.js';
 const mockCache = {
   get: vi.fn(),
   put: vi.fn(),
+  getAll: vi.fn(),
 };
 
 const mockCacheService = {
@@ -196,28 +197,42 @@ describe('Code.js', () => {
   });
 
   describe('doGet', () => {
-    it('should return a list of doc IDs from cache if available and log it', () => {
-      mockCache.get.mockReturnValue(JSON.stringify(['cachedId1', 'cachedId2']));
+    it('should return a list of doc IDs and article_cache from cache if available', () => {
+      const allIds = ['id1', 'id2'];
+      const article1 = { id: 'id1', title: 'Title 1', markdown: 'MD 1' };
+      const article2 = { id: 'id2', title: 'Title 2', markdown: 'MD 2' };
+
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        return null;
+      });
+      mockCache.getAll.mockReturnValue({
+        'id1': JSON.stringify(article1),
+        'id2': JSON.stringify(article2),
+      });
+
       const mockTextOutput = {
         setMimeType: vi.fn().mockReturnThis(),
       };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
-      mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
       const e = { parameter: {} };
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
-      expect(global.console.log).toHaveBeenCalledWith("List retrieved from cache");
-      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining("List retrieved from cache"));
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['cachedId1', 'cachedId2']));
+      expect(mockCache.getAll).toHaveBeenCalledWith(['id1', 'id2']);
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: allIds,
+        article_cache: [article1, article2]
+      }));
     });
 
-    it('should return a list of doc IDs from Drive and NOT write to cache if not found', () => {
+    it('should fetch list and articles from Drive/Docs on cache miss and save to cache', () => {
       mockCache.get.mockReturnValue(null);
+      mockCache.getAll.mockReturnValue({});
+
       const mockFiles = [
-        { getId: () => 'id2', getName: () => 'Doc B' },
-        { getId: () => 'id1', getName: () => 'Doc A' },
+        { getId: () => 'id1', getName: () => 'Doc 1' },
       ];
       let index = 0;
       const mockIterator = {
@@ -229,6 +244,26 @@ describe('Code.js', () => {
       };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
 
+      // Mock getDocInfoInFolder_ and openById for the article fetch
+      const mockParentsIterator = {
+        hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
+      };
+      const mockFile = {
+        getMimeType: () => mockMimeType.GOOGLE_DOCS,
+        getParents: () => mockParentsIterator,
+        getName: () => 'Doc 1',
+      };
+      mockDriveApp.getFileById.mockReturnValue(mockFile);
+
+      const mockDoc = {
+        getName: () => 'Doc 1',
+        getBody: () => ({
+          getNumChildren: () => 0,
+        }),
+      };
+      mockDocumentApp.openById.mockReturnValue(mockDoc);
+
       const mockTextOutput = {
         setMimeType: vi.fn().mockReturnThis(),
       };
@@ -238,16 +273,66 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
-      expect(global.console.log).toHaveBeenCalledWith("List not in cache. Getting from Drive");
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify(['id2', 'id1']));
-      expect(mockCache.put).not.toHaveBeenCalled();
+      expect(mockCache.put).toHaveBeenCalledWith('0', JSON.stringify(['id1']), Code.CACHE_TTL);
+      expect(mockCache.put).toHaveBeenCalledWith('id1', expect.stringContaining('"title":"Doc 1"'), Code.CACHE_TTL);
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
     });
 
-    it('should handle null e or e.parameter', () => {
+    it('should handle article fetch errors and continue', () => {
+      mockCache.get.mockReturnValue(JSON.stringify(['id1', 'id2']));
+      mockCache.getAll.mockReturnValue({}); // Miss both
+
+      // Mock both to exist in folder
+      mockDriveApp.getFileById.mockImplementation((id) => {
+        return {
+          getMimeType: () => mockMimeType.GOOGLE_DOCS,
+          getParents: () => ({
+            hasNext: () => true,
+            next: () => ({ getId: () => Code.FOLDER_ID })
+          }),
+          getName: () => 'Doc ' + id
+        };
+      });
+
+      mockDocumentApp.openById.mockImplementation((id) => {
+        if (id === 'id1') throw new Error('Open Error');
+        return {
+          getName: () => 'Doc 2',
+          getBody: () => ({ getNumChildren: () => 0 })
+        };
+      });
+
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({});
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Error fetching article id1: Open Error'));
+      // Should still have id2 in article_cache
+      const response = JSON.parse(mockContentService.createTextOutput.mock.calls[0][0]);
+      expect(response.article_cache).toHaveLength(1);
+      expect(response.article_cache[0].id).toBe('id2');
+    });
+
+    it('should handle cache put errors gracefully', () => {
       mockCache.get.mockReturnValue(null);
+      mockCache.put.mockImplementation(() => { throw new Error('Quota exceeded'); });
+
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
       mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({});
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Failed to cache list: Quota exceeded'));
+    });
+
+    it('should handle null e or e.parameter', () => {
+      mockCache.get.mockReturnValue(JSON.stringify([]));
+      mockCache.getAll.mockReturnValue({});
       const mockTextOutput = {
         setMimeType: vi.fn().mockReturnThis(),
       };
@@ -260,7 +345,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalled();
     });
 
-    it('should return document from cache if available and log it', () => {
+    it('should return document from cache if available when ID is specified', () => {
       const docId = 'cachedDocId';
       const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD' });
       mockCache.get.mockImplementation((key) => {
@@ -272,18 +357,15 @@ describe('Code.js', () => {
         setMimeType: vi.fn().mockReturnThis(),
       };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
-      mockUtilities.formatDate.mockReturnValue('01/01 12:00:00');
 
       const e = { parameter: { id: docId } };
       Code.doGet(e);
 
       expect(mockCache.get).toHaveBeenCalledWith(docId);
-      expect(global.console.log).toHaveBeenCalledWith(`Document (ID:${docId}) retrieved from cache`);
-      expect(mockProperties.setProperty).toHaveBeenCalledWith('DEBUG_LOGS', expect.stringContaining(`Document (ID:${docId}) retrieved from cache`));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(cachedPayload);
     });
 
-    it('should return an error when the provided ID does not exist in the folder and not in cache', () => {
+    it('should return an error when the provided ID does not exist', () => {
       mockCache.get.mockReturnValue(null);
       mockDriveApp.getFileById.mockImplementation(() => {
         throw new Error('Not found');
@@ -300,8 +382,10 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
-    it('should return document title and markdown and NOT write to cache if miss in doGet', () => {
+    it('should fetch, save to cache, and return document when ID is specified but not in cache', () => {
       const fileId = 'valid-id';
+      mockCache.get.mockReturnValue(null);
+
       const mockParentsIterator = {
         hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
         next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
@@ -313,27 +397,9 @@ describe('Code.js', () => {
       };
       mockDriveApp.getFileById.mockReturnValue(mockFile);
 
-      const mockBody = {
-        getNumChildren: () => 1,
-        getChild: () => ({
-          getType: () => mockDocumentApp.ElementType.PARAGRAPH,
-          asParagraph: () => ({
-            getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
-            getNumChildren: () => 1,
-            getChild: () => ({
-              getType: () => mockDocumentApp.ElementType.TEXT,
-              asText: () => ({
-                getText: () => 'Hello World',
-                getTextAttributeIndices: () => [0],
-                getAttributes: () => ({}),
-              }),
-            }),
-          }),
-        }),
-      };
       const mockDoc = {
         getName: () => 'Valid Doc',
-        getBody: () => mockBody,
+        getBody: () => ({ getNumChildren: () => 0 }),
       };
       mockDocumentApp.openById.mockReturnValue(mockDoc);
 
@@ -345,12 +411,31 @@ describe('Code.js', () => {
       const e = { parameter: { id: fileId } };
       Code.doGet(e);
 
-      expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
-      expect(global.console.log).toHaveBeenCalledWith(`Document (ID:${fileId}) not in cache. Generating...`);
+      expect(mockCache.put).toHaveBeenCalledWith(fileId, expect.stringContaining('"title":"Valid Doc"'), Code.CACHE_TTL);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"Hello World\\n"'));
-      expect(mockCache.put).not.toHaveBeenCalled();
-      expect(global.console.log).not.toHaveBeenCalledWith(expect.stringContaining(`Document (ID:${fileId}) generated and saved to property`));
+    });
+
+    it('should handle cache put errors when ID is specified', () => {
+      const fileId = 'valid-id';
+      mockCache.get.mockReturnValue(null);
+      mockCache.put.mockImplementation(() => { throw new Error('Put failed'); });
+
+      mockDriveApp.getFileById.mockReturnValue({
+        getMimeType: () => mockMimeType.GOOGLE_DOCS,
+        getParents: () => ({ hasNext: () => true, next: () => ({ getId: () => Code.FOLDER_ID }) }),
+        getName: () => 'Valid Doc',
+      });
+      mockDocumentApp.openById.mockReturnValue({
+        getName: () => 'Valid Doc',
+        getBody: () => ({ getNumChildren: () => 0 }),
+      });
+
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { id: fileId } });
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Failed to cache article valid-id: Put failed'));
     });
   });
 
@@ -414,6 +499,22 @@ describe('Code.js', () => {
           }),
         };
         expect(Code.paragraphToMarkdown_(mockP)).toBe('# Heading\n');
+      });
+
+      it('should handle normal paragraphs', () => {
+        const mockP = {
+          getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({
+              getText: () => 'Normal Paragraph',
+              getTextAttributeIndices: () => [0],
+              getAttributes: () => ({}),
+            }),
+          }),
+        };
+        expect(Code.paragraphToMarkdown_(mockP)).toBe('Normal Paragraph\n');
       });
     });
 
