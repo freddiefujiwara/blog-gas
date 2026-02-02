@@ -46,6 +46,17 @@ export function preCacheAll() {
 }
 
 /**
+ * Clear all cache entries used by the application
+ */
+export function clearCacheAll() {
+  const cache = CacheService.getScriptCache();
+  const allIds = listDocIdsSortedByName_(FOLDER_ID);
+  const keysToRemove = ["0", ...allIds];
+  cache.removeAll(keysToRemove);
+  console.log("Cache cleared");
+}
+
+/**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
  */

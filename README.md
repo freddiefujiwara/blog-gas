@@ -54,6 +54,7 @@ Here are the main parts of the code:
 
 - `FOLDER_ID`: The ID of the Google Drive folder where your documents are.
 - `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It clears old debug logs, saves the list of documents and the content of the top 10 documents to script properties to improve API performance.
+- `clearCacheAll()`: Clears all cache entries used by the application, including the document list and individual document contents.
 - `doGet(e)`: This is the main function for the Web API. It retrieves content from script properties if available; otherwise, it fetches the data directly and saves it to properties for future use. It decides to either list files or convert a file based on the `id` parameter.
 - `saveLog_(msg)`: Appends a log message with a JST timestamp to the `DEBUG_LOGS` script property (limited to 9000 characters).
 - `log_(msg)`: A wrapper that outputs a log message to both `console.log` and the `DEBUG_LOGS` script property.
