@@ -4,10 +4,10 @@ info:
   version: 1.0.0
   description: API to list Google Docs in a folder and convert them to Markdown.
 servers:
-  - url: https://script.google.com/macros/s/AKfycbydcnw4yt5K8lz8Wf0PCbG6Q9yD3jf1W2lsGucOor2KII7duJr7qevcMiwNHJTe8GZH/exec
+  - url: https://script.google.com/macros/s/AKfycbydcnw4yt5K8lz8Wf0PCbG6Q9yD3jf1W2lsGucOor2KII7duJr7qevcMiwNHJTe8GZH
     description: Production deployment of the Google Apps Script Web App.
 paths:
-  /:
+  /exec:
     get:
       summary: Get document list or a specific document content
       description: |
