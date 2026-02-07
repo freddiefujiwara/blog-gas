@@ -48,15 +48,19 @@ The script runs as a Web App.
    }
    ```
 
+## API Specification
+
+The API is documented using the OpenAPI Specification. You can find the definition in [openapi.yaml](./openapi.yaml).
+
 ## Code Explanation (`src/Code.js`)
 
 Here are the main parts of the code:
 
 - `FOLDER_ID`: The ID of the Google Drive folder where your documents are.
+- `CACHE_TTL`: Cache time-to-live in seconds (default: 600).
+- `CACHE_SIZE_LIMIT`: Maximum size of a cache entry in characters (default: 100,000).
 - `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It clears old debug logs, saves the list of documents and the content of the top 10 documents to script properties to improve API performance.
 - `doGet(e)`: This is the main function for the Web API. It retrieves content from script properties if available; otherwise, it fetches the data directly and saves it to properties for future use. It decides to either list files or convert a file based on the `id` parameter.
-- `saveLog_(msg)`: Appends a log message with a JST timestamp to the `DEBUG_LOGS` script property (limited to 9000 characters).
-- `log_(msg)`: A wrapper that outputs a log message to both `console.log` and the `DEBUG_LOGS` script property.
 - `listDocIdsSortedByName_`: This function finds all Google Docs in your folder and sorts them by their names.
 - `getDocInfoInFolder_`: Verifies if a document exists within the specified folder and retrieves its metadata.
 - `docBodyToMarkdown_`: This is the main engine. It reads the Google Doc and turns it into Markdown text.
@@ -64,9 +68,15 @@ Here are the main parts of the code:
 - `paragraphToMarkdown_`: This converts regular text and headings.
 - `listItemToMarkdown_`: Converts Google Doc list items (bulleted or numbered) into Markdown format.
 - `tableToMarkdown_`: This turns Google Doc tables into Markdown tables.
+- `headingToPrefix_`: Helper to convert paragraph heading levels to Markdown prefixes (#, ##, etc.).
+- `isOrderedGlyph_`: Helper to determine if a list item's glyph type suggests an ordered list.
 - `paragraphTextWithInlineStyles_`: This looks for **bold**, *italic*, and [links] inside the text.
+- `escapeMdInline_`: Escapes special characters like backslashes and backticks in inline text for Markdown.
+- `escapeMdTable_`: Escapes pipes in table cells for Markdown.
 - `json_`: A helper to send the data back in JSON format.
 - `jsonError_`: A helper function to return error messages in JSON format.
+- `saveLog_(msg)`: Appends a log message with a JST timestamp to the `DEBUG_LOGS` script property (limited to 9000 characters).
+- `log_(msg)`: A wrapper that outputs a log message to both `console.log` and the `DEBUG_LOGS` script property.
 
 ## How to setup and deploy
 
