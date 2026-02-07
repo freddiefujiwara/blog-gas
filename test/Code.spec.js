@@ -6,6 +6,7 @@ const mockCache = {
   get: vi.fn(),
   put: vi.fn(),
   getAll: vi.fn(),
+  removeAll: vi.fn(),
 };
 
 const mockCacheService = {
@@ -193,6 +194,44 @@ describe('Code.js', () => {
       // Should only call put for the list ('0'), not for the document
       expect(mockCache.put).toHaveBeenCalledTimes(1);
       expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
+    });
+  });
+
+  describe('clearCacheAll', () => {
+    it('should call removeAll with correct keys', () => {
+      const mockFiles = [
+        { getId: () => 'id1', getName: () => 'Doc 1' },
+        { getId: () => 'id2', getName: () => 'Doc 2' },
+      ];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      Code.clearCacheAll();
+
+      expect(mockCache.removeAll).toHaveBeenCalledWith(['0', 'id2', 'id1']);
+      expect(global.console.log).toHaveBeenCalledWith("Cache cleared");
+    });
+
+    it('should handle empty folder in clearCacheAll', () => {
+      const mockIterator = {
+        hasNext: () => false,
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      Code.clearCacheAll();
+
+      expect(mockCache.removeAll).toHaveBeenCalledWith(['0']);
+      expect(global.console.log).toHaveBeenCalledWith("Cache cleared");
     });
   });
 

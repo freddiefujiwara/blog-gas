@@ -60,6 +60,7 @@ Here are the main parts of the code:
 - `CACHE_TTL`: Cache time-to-live in seconds (default: 600).
 - `CACHE_SIZE_LIMIT`: Maximum size of a cache entry in characters (default: 100,000).
 - `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It clears old debug logs, saves the list of documents and the content of the top 10 documents to script properties to improve API performance.
+- `clearCacheAll()`: Clears all cache entries used by the application, including the document list and individual document contents.
 - `doGet(e)`: This is the main function for the Web API. It retrieves content from script properties if available; otherwise, it fetches the data directly and saves it to properties for future use. It decides to either list files or convert a file based on the `id` parameter.
 - `listDocIdsSortedByName_`: This function finds all Google Docs in your folder and sorts them by their names.
 - `getDocInfoInFolder_`: Verifies if a document exists within the specified folder and retrieves its metadata.
