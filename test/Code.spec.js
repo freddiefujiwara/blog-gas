@@ -1030,6 +1030,51 @@ describe('Code.js', () => {
       expect(mockProperties.deleteProperty).toHaveBeenCalledWith('OLD_KEY2');
     });
 
+    it('should fallback to DocumentApp when article is not in cache', () => {
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['missing-id']);
+        return null;
+      });
+      mockProperties.getProperty.mockReturnValue(null);
+
+      const mockDoc = {
+        getName: () => 'Missing Doc',
+        getBody: () => ({
+          getNumChildren: () => 0
+        })
+      };
+      mockDocumentApp.openById.mockReturnValue(mockDoc);
+
+      Code.dailyRSSCache();
+
+      expect(mockDocumentApp.openById).toHaveBeenCalledWith('missing-id');
+      const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
+      const savedChunk = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === savedDataKeys[0])[1]);
+      expect(savedChunk[0].title).toBe('Missing Doc');
+    });
+
+    it('should continue processing if DocumentApp.openById fails', () => {
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['fail-id', 'success-id']);
+        if (key === 'success-id') return JSON.stringify({ id: 'success-id', title: 'Success', markdown: 'M' });
+        return null;
+      });
+      mockProperties.getProperty.mockReturnValue(null);
+
+      mockDocumentApp.openById.mockImplementation((id) => {
+        if (id === 'fail-id') throw new Error('Open Failed');
+        return { getName: () => 'Success', getBody: () => ({ getNumChildren: () => 0 }) };
+      });
+
+      Code.dailyRSSCache();
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('RSS Cache: Failed to fetch article fail-id: Open Failed'));
+      const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
+      const savedChunk = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === savedDataKeys[0])[1]);
+      expect(savedChunk).toHaveLength(1);
+      expect(savedChunk[0].id).toBe('success-id');
+    });
+
     it('should handle missing article list', () => {
       mockCache.get.mockReturnValue(null);
       Code.dailyRSSCache();

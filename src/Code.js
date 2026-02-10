@@ -65,10 +65,25 @@ export function dailyRSSCache() {
     const itemsToSave = [];
 
     for (const id of targetIds) {
+      let article;
       const cachedArticle = cache.get(id);
-      if (!cachedArticle) continue;
+      if (cachedArticle) {
+        article = JSON.parse(cachedArticle);
+      } else {
+        log_(`RSS Cache: Article (ID:${id}) not in cache. Fetching from DocumentApp...`);
+        try {
+          const doc = DocumentApp.openById(id);
+          article = {
+            id: id,
+            title: doc.getName(),
+            markdown: docBodyToMarkdown_(doc)
+          };
+        } catch (e) {
+          log_(`RSS Cache: Failed to fetch article ${id}: ${e.message}`);
+          continue;
+        }
+      }
 
-      const article = JSON.parse(cachedArticle);
       const item = {
         id: article.id,
         title: article.title,
