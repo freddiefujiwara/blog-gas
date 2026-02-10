@@ -47,7 +47,8 @@ export function preCacheAll() {
 
 /**
  * Create RSS source data (JSON string) and save to PropertiesService.
- * Limit the total size to stay under 9KB.
+ * Split the data into multiple properties (RSS_DATA001, RSS_DATA002, ...)
+ * to overcome the 9KB per-key limit of PropertiesService.
  */
 export function dailyRSSCache() {
   try {
@@ -60,7 +61,7 @@ export function dailyRSSCache() {
 
     const allIds = JSON.parse(cachedList);
     const top10Ids = allIds.slice(0, 10);
-    const rssItems = [];
+    const itemsToSave = [];
 
     for (const id of top10Ids) {
       const cachedArticle = cache.get(id);
@@ -74,41 +75,78 @@ export function dailyRSSCache() {
         content: article.markdown
       };
 
-      // Check size and truncate if necessary
-      const currentJson = JSON.stringify([...rssItems, item]);
-      if (currentJson.length > 9000) {
-        // Try truncating content
-        const baseItemJson = JSON.stringify([...rssItems, { ...item, content: "" }]);
-        const remainingSpace = 9000 - baseItemJson.length;
-        if (remainingSpace > 10) {
-          item.content = item.content.substring(0, remainingSpace - 10) + "...";
-        } else {
-          item.content = "";
-        }
-
-        // Final check for the truncated item
-        if (JSON.stringify([...rssItems, item]).length > 9000) {
-          break; // Still too big, stop here
-        }
+      // Ensure single item is under 9KB bytes (using 9000 for safety)
+      let itemStr = JSON.stringify(item);
+      if (getByteLength_(itemStr) > 9000) {
+        // Truncate content until it fits (safe estimation: 3 bytes per Japanese char)
+        // Using a 10-byte margin for safety.
+        const safeChars = Math.floor((9000 - JSON.stringify({ ...item, content: "" }).length - 10) / 3);
+        item.content = item.content.substring(0, Math.max(0, safeChars)) + "...";
       }
-
-      rssItems.push(item);
-      if (JSON.stringify(rssItems).length > 9000) {
-        rssItems.pop();
-        break;
-      }
+      itemsToSave.push(item);
     }
 
-    if (rssItems.length > 0) {
-      const rssData = JSON.stringify(rssItems);
-      PropertiesService.getScriptProperties().setProperty('RSS_DATA', rssData);
-      log_(`RSS Cache: Saved ${rssItems.length} articles to Properties.`);
-    } else {
+    if (itemsToSave.length === 0) {
       log_("RSS Cache: No articles to save.");
+      return;
     }
+
+    // Group items into buckets of 9000 bytes
+    const buckets = [];
+    let currentBucket = [];
+
+    for (const item of itemsToSave) {
+      const nextBucketCandidate = [...currentBucket, item];
+      if (getByteLength_(JSON.stringify(nextBucketCandidate)) > 9000) {
+        if (currentBucket.length > 0) {
+          buckets.push(currentBucket);
+          currentBucket = [item];
+        } else {
+          buckets.push([item]);
+          currentBucket = [];
+        }
+      } else {
+        currentBucket.push(item);
+      }
+    }
+    if (currentBucket.length > 0) buckets.push(currentBucket);
+
+    const props = PropertiesService.getScriptProperties();
+
+    // 1. Cleanup old properties based on current index
+    const oldIndexStr = props.getProperty('RSS_DATA');
+    if (oldIndexStr) {
+      try {
+        const oldKeys = JSON.parse(oldIndexStr);
+        if (Array.isArray(oldKeys)) {
+          oldKeys.forEach(k => {
+            if (k !== 'RSS_DATA') props.deleteProperty(k);
+          });
+        }
+      } catch (e) { /* Ignore */ }
+    }
+
+    // 2. Save new chunks
+    const newKeys = [];
+    buckets.forEach((bucket, i) => {
+      const key = `RSS_DATA${(i + 1).toString().padStart(3, '0')}`;
+      props.setProperty(key, JSON.stringify(bucket));
+      newKeys.push(key);
+    });
+
+    // 3. Save index
+    props.setProperty('RSS_DATA', JSON.stringify(newKeys));
+    log_(`RSS Cache: Saved ${itemsToSave.length} articles across ${newKeys.length} properties.`);
   } catch (e) {
     log_("RSS Cache Error: " + e.message);
   }
+}
+
+/**
+ * Helper to get byte length of a string in GAS
+ */
+function getByteLength_(s) {
+  return Utilities.newBlob(s).getBytes().length;
 }
 
 /**

@@ -35,6 +35,15 @@ const mockPropertiesService = {
 
 const mockUtilities = {
   formatDate: vi.fn(),
+  newBlob: vi.fn().mockImplementation((s) => ({
+    getBytes: () => {
+      let bytes = 0;
+      for (let i = 0; i < s.length; i++) {
+        bytes += s.charCodeAt(i) > 127 ? 3 : 1;
+      }
+      return new Array(bytes);
+    }
+  })),
 };
 
 const mockDocumentApp = {
@@ -925,7 +934,7 @@ describe('Code.js', () => {
   });
 
   describe('dailyRSSCache', () => {
-    it('should save RSS items to PropertiesService', () => {
+    it('should save RSS items split across multiple properties as valid JSON arrays', () => {
       const allIds = ['id1', 'id2'];
       const article1 = { id: 'id1', title: 'Title 1', markdown: 'MD 1' };
       const article2 = { id: 'id2', title: 'Title 2', markdown: 'MD 2' };
@@ -936,27 +945,21 @@ describe('Code.js', () => {
         if (key === 'id2') return JSON.stringify(article2);
         return null;
       });
+      mockProperties.getProperty.mockReturnValue(null);
 
       Code.dailyRSSCache();
 
-      expect(mockProperties.setProperty).toHaveBeenCalledWith(
-        'RSS_DATA',
-        JSON.stringify([
-          { id: 'id1', title: 'Title 1', url: 'https://freddiefujiwara.com/blog/id1', content: 'MD 1' },
-          { id: 'id2', title: 'Title 2', url: 'https://freddiefujiwara.com/blog/id2', content: 'MD 2' },
-        ])
-      );
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('RSS_DATA', JSON.stringify(['RSS_DATA001']));
+      const savedChunkStr = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA001')[1];
+      const savedChunk = JSON.parse(savedChunkStr);
+      expect(savedChunk).toHaveLength(2);
+      expect(savedChunk[0].id).toBe('id1');
     });
 
-    it('should handle missing article list', () => {
-      mockCache.get.mockReturnValue(null);
-      Code.dailyRSSCache();
-      expect(mockProperties.setProperty).not.toHaveBeenCalledWith('RSS_DATA', expect.any(String));
-    });
-
-    it('should truncate content to stay under 9000 characters', () => {
+    it('should truncate individual articles exceeding 9KB and keep JSON valid', () => {
       const allIds = ['id1'];
-      const longMarkdown = 'a'.repeat(10000);
+      // 'あ' is 3 bytes in our mock. 4000 'あ' = 12000 bytes.
+      const longMarkdown = 'あ'.repeat(4000);
       const article1 = { id: 'id1', title: 'Title 1', markdown: longMarkdown };
 
       mockCache.get.mockImplementation((key) => {
@@ -964,28 +967,55 @@ describe('Code.js', () => {
         if (key === 'id1') return JSON.stringify(article1);
         return null;
       });
+      mockProperties.getProperty.mockReturnValue(null);
 
       Code.dailyRSSCache();
 
-      const call = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA');
-      const savedData = JSON.parse(call[1]);
-      expect(call[1].length).toBeLessThanOrEqual(9000);
-      expect(savedData[0].content).toMatch(/a+\.\.\./);
+      const savedChunkStr = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA001')[1];
+      const savedChunk = JSON.parse(savedChunkStr);
+
+      // Verify byte length using our mock logic
+      let bytes = 0;
+      for (let i = 0; i < savedChunkStr.length; i++) {
+        bytes += savedChunkStr.charCodeAt(i) > 127 ? 3 : 1;
+      }
+      expect(bytes).toBeLessThanOrEqual(9000);
+      expect(savedChunk[0].content).toMatch(/あ+\.\.\./);
     });
 
-    it('should stop adding articles if they cannot fit even without content', () => {
-      const allIds = Array.from({ length: 10 }, (_, i) => `id${i}`);
+    it('should group multiple articles into buckets appropriately', () => {
+      const allIds = ['id1', 'id2'];
+      // mediumMarkdown is ~4800 bytes. Two will exceed 9000.
+      const mediumMarkdown = 'あ'.repeat(1600);
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
-        return JSON.stringify({ id: key, title: 'A'.repeat(1000), markdown: 'B' });
+        return JSON.stringify({ id: key, title: 'Title', markdown: mediumMarkdown });
       });
+      mockProperties.getProperty.mockReturnValue(null);
 
       Code.dailyRSSCache();
 
-      const call = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA');
-      expect(call[1].length).toBeLessThanOrEqual(9000);
-      const savedData = JSON.parse(call[1]);
-      expect(savedData.length).toBeLessThan(10);
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('RSS_DATA', JSON.stringify(['RSS_DATA001', 'RSS_DATA002']));
+    });
+
+    it('should cleanup old properties', () => {
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['id1']);
+        if (key === 'id1') return JSON.stringify({ id: 'id1', title: 't', markdown: 'm' });
+        return null;
+      });
+      mockProperties.getProperty.mockReturnValue(JSON.stringify(['OLD_KEY1', 'OLD_KEY2']));
+
+      Code.dailyRSSCache();
+
+      expect(mockProperties.deleteProperty).toHaveBeenCalledWith('OLD_KEY1');
+      expect(mockProperties.deleteProperty).toHaveBeenCalledWith('OLD_KEY2');
+    });
+
+    it('should handle missing article list', () => {
+      mockCache.get.mockReturnValue(null);
+      Code.dailyRSSCache();
+      expect(mockProperties.setProperty).not.toHaveBeenCalledWith('RSS_DATA', expect.any(String));
     });
 
     it('should log errors', () => {
