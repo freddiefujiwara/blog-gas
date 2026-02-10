@@ -24,8 +24,8 @@ export function preCacheAll() {
     console.error("Failed to save list: " + e.message);
   }
 
-  // 2. Save content of first 10 items
-  const targetIds = allIds.slice(0, 10);
+  // 2. Save content of first 50 items (Increased from 10 to support more RSS articles)
+  const targetIds = allIds.slice(0, 50);
   targetIds.forEach(docId => {
     try {
       const doc = DocumentApp.openById(docId);
@@ -60,10 +60,11 @@ export function dailyRSSCache() {
     }
 
     const allIds = JSON.parse(cachedList);
-    const top10Ids = allIds.slice(0, 10);
+    // Process up to 50 articles (Increased from 10)
+    const targetIds = allIds.slice(0, 50);
     const itemsToSave = [];
 
-    for (const id of top10Ids) {
+    for (const id of targetIds) {
       const cachedArticle = cache.get(id);
       if (!cachedArticle) continue;
 
@@ -91,25 +92,47 @@ export function dailyRSSCache() {
       return;
     }
 
-    // Group items into buckets of 9000 bytes
+    // Group items into buckets of 9000 bytes, staying within 450KB total
     const buckets = [];
     let currentBucket = [];
+    let totalBytes = 0;
+    const TOTAL_LIMIT = 450000;
 
     for (const item of itemsToSave) {
       const nextBucketCandidate = [...currentBucket, item];
-      if (getByteLength_(JSON.stringify(nextBucketCandidate)) > 9000) {
+      const nextBucketStr = JSON.stringify(nextBucketCandidate);
+      const nextBucketBytes = getByteLength_(nextBucketStr);
+
+      if (nextBucketBytes > 9000) {
         if (currentBucket.length > 0) {
+          // Check if adding this bucket exceeds total limit
+          const bucketStr = JSON.stringify(currentBucket);
+          const bucketBytes = getByteLength_(bucketStr);
+          if (totalBytes + bucketBytes > TOTAL_LIMIT) break;
+
           buckets.push(currentBucket);
+          totalBytes += bucketBytes;
           currentBucket = [item];
+
+          // If a single item is still over 9000 (though handled above),
+          // we might need to be careful, but handled by getByteLength_ check in next iteration
         } else {
+          // Single item over 9000 is already truncated to fit 9000 individually
+          if (totalBytes + nextBucketBytes > TOTAL_LIMIT) break;
           buckets.push([item]);
+          totalBytes += nextBucketBytes;
           currentBucket = [];
         }
       } else {
         currentBucket.push(item);
       }
     }
-    if (currentBucket.length > 0) buckets.push(currentBucket);
+    if (currentBucket.length > 0) {
+      const bucketStr = JSON.stringify(currentBucket);
+      if (totalBytes + getByteLength_(bucketStr) <= TOTAL_LIMIT) {
+        buckets.push(currentBucket);
+      }
+    }
 
     const props = PropertiesService.getScriptProperties();
 
@@ -180,11 +203,12 @@ export function doGet(e) {
       allIds = listDocIdsSortedByName_(FOLDER_ID);
     }
 
-    const top10Ids = allIds.slice(0, 10);
-    const cachedArticles = cache.getAll(top10Ids);
+    // Return up to 50 articles (Increased from 10)
+    const targetIds = allIds.slice(0, 50);
+    const cachedArticles = cache.getAll(targetIds);
     const articleCache = [];
 
-    top10Ids.forEach(id => {
+    targetIds.forEach(id => {
       if (cachedArticles[id]) {
         articleCache.push(JSON.parse(cachedArticles[id]));
       } else {
