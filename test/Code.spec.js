@@ -14,7 +14,7 @@ const mockCacheService = {
 };
 
 const mockContentService = {
-  MimeType: { JSON: 'JSON' },
+  MimeType: { JSON: 'JSON', XML: 'XML' },
   createTextOutput: vi.fn(),
 };
 
@@ -324,6 +324,28 @@ describe('Code.js', () => {
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
       expect(mockCache.put).not.toHaveBeenCalled();
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
+    });
+
+    it('should return RSS XML when o=rss is specified', () => {
+      const chunkData = [{ id: 'id1', title: 'Title & More', url: 'http://url', content: 'Content <md>' }];
+      mockProperties.getProperty.mockImplementation((key) => {
+        if (key === 'RSS_DATA') return JSON.stringify(['RSS_DATA001']);
+        if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
+        return null;
+      });
+
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      const e = { parameter: { o: 'rss' } };
+      Code.doGet(e);
+
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<rss version="2.0">'));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>Title &amp; More</title>'));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<description>Content &lt;md&gt;</description>'));
+      expect(mockTextOutput.setMimeType).toHaveBeenCalledWith('XML');
     });
 
     it('should handle article fetch errors and continue', () => {

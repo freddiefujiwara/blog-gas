@@ -204,6 +204,10 @@ export function clearCacheAll() {
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
+  const output = e && e.parameter ? e.parameter.o : null;
+
+  if (output === 'rss') return generateRSSResponse_();
+
   const cache = CacheService.getScriptCache();
 
   // --- Case A: No ID (Get list + article_cache) ---
@@ -514,6 +518,61 @@ export function escapeMdInline_(s) {
 export function escapeMdTable_(s) {
   // Do not break Markdown table separator
   return s.replace(/\|/g, '\\|');
+}
+
+/** -----------------------------
+ *  RSS helpers
+ *  ----------------------------- */
+function generateRSSResponse_() {
+  const props = PropertiesService.getScriptProperties();
+  const indexStr = props.getProperty('RSS_DATA');
+  let items = [];
+  if (indexStr) {
+    try {
+      const keys = JSON.parse(indexStr);
+      keys.forEach(key => {
+        const chunk = props.getProperty(key);
+        if (chunk) {
+          const parsed = JSON.parse(chunk);
+          if (Array.isArray(parsed)) {
+            items = items.concat(parsed);
+          }
+        }
+      });
+    } catch (e) {
+      log_("RSS Generation Error: " + e.message);
+    }
+  }
+
+  let rss = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  rss += '<rss version="2.0">\n';
+  rss += '  <channel>\n';
+  rss += '    <title>Freddie Fujiwara\'s Blog</title>\n';
+  rss += '    <link>https://freddiefujiwara.com/blog</link>\n';
+  rss += '    <description>Recent articles from Freddie Fujiwara\'s Blog</description>\n';
+
+  items.forEach(item => {
+    rss += '    <item>\n';
+    rss += `      <title>${escapeXml_(item.title)}</title>\n`;
+    rss += `      <link>${escapeXml_(item.url)}</link>\n`;
+    rss += `      <description>${escapeXml_(item.content)}</description>\n`;
+    rss += `      <guid>${escapeXml_(item.url)}</guid>\n`;
+    rss += '    </item>\n';
+  });
+
+  rss += '  </channel>\n';
+  rss += '</rss>';
+
+  return ContentService.createTextOutput(rss).setMimeType(ContentService.MimeType.XML);
+}
+
+function escapeXml_(s) {
+  if (!s) return "";
+  return s.replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /** -----------------------------
