@@ -53,15 +53,15 @@ export function preCacheAll() {
 export function dailyRSSCache() {
   try {
     const cache = CacheService.getScriptCache();
+    let allIds;
     const cachedList = cache.get("0");
-    if (!cachedList) {
-      log_("RSS Cache: No article list found in cache.");
-      return;
+    if (cachedList) {
+      allIds = JSON.parse(cachedList);
+    } else {
+      log_("RSS Cache: No article list found in cache. Getting from Drive...");
+      allIds = listDocIdsSortedByName_(FOLDER_ID);
     }
-
-    const allIds = JSON.parse(cachedList);
-    // Process up to 50 articles (Increased from 10)
-    const targetIds = allIds.slice(0, 50);
+    const targetIds = allIds.slice(0, 10);
     const itemsToSave = [];
 
     for (const id of targetIds) {

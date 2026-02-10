@@ -1006,9 +1006,9 @@ describe('Code.js', () => {
       expect(savedChunk[0].content).toMatch(/あ+\.\.\./);
     });
 
-    it('should group multiple articles into buckets appropriately and support more than 10', () => {
+    it('should group multiple articles into buckets appropriately but limit to 10', () => {
       const allIds = Array.from({ length: 15 }, (_, i) => `id${i}`);
-      // Each article is small enough to fit many in one bucket, but we check if it processes all 15
+      // Each article is small enough to fit many in one bucket, but we check if it processes exactly 10
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
         return JSON.stringify({ id: key, title: 'Title', markdown: 'short' });
@@ -1019,12 +1019,12 @@ describe('Code.js', () => {
 
       const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
       const firstChunk = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === savedDataKeys[0])[1]);
-      expect(firstChunk.length).toBe(15);
+      expect(firstChunk.length).toBe(10);
     });
 
     it('should respect TOTAL_LIMIT (450KB)', () => {
-      const allIds = Array.from({ length: 60 }, (_, i) => `id${i}`);
-      // Each article ~9000 bytes. 50 articles ~ 450,000 bytes.
+      const allIds = Array.from({ length: 20 }, (_, i) => `id${i}`);
+      // Each article ~9000 bytes.
       const largeMarkdown = 'あ'.repeat(2900);
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
@@ -1035,7 +1035,8 @@ describe('Code.js', () => {
       Code.dailyRSSCache();
 
       const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
-      expect(savedDataKeys.length).toBeLessThanOrEqual(50); // Each bucket is likely 1 article because it's close to 9000
+      // Should still be limited to 10 articles total because of the slice
+      expect(savedDataKeys.length).toBeLessThanOrEqual(10);
     });
 
     it('should cleanup old properties', () => {
@@ -1097,10 +1098,30 @@ describe('Code.js', () => {
       expect(savedChunk[0].id).toBe('success-id');
     });
 
-    it('should handle missing article list', () => {
+    it('should fallback to Drive if article list is not in cache', () => {
       mockCache.get.mockReturnValue(null);
+
+      const mockFiles = [{ getId: () => 'drive-id', getName: () => 'Drive Doc' }];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: () => mockIterator
+      });
+
+      mockCache.get.mockImplementation((key) => {
+        if (key === 'drive-id') return JSON.stringify({ id: 'drive-id', title: 'Drive Doc', markdown: 'M' });
+        return null;
+      });
+
       Code.dailyRSSCache();
-      expect(mockProperties.setProperty).not.toHaveBeenCalledWith('RSS_DATA', expect.any(String));
+
+      expect(mockDriveApp.getFolderById).toHaveBeenCalled();
+      const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
+      const savedChunk = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === savedDataKeys[0])[1]);
+      expect(savedChunk[0].id).toBe('drive-id');
     });
 
     it('should log errors', () => {
