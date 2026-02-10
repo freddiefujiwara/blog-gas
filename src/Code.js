@@ -46,6 +46,72 @@ export function preCacheAll() {
 }
 
 /**
+ * Create RSS source data (JSON string) and save to PropertiesService.
+ * Limit the total size to stay under 9KB.
+ */
+export function dailyRSSCache() {
+  try {
+    const cache = CacheService.getScriptCache();
+    const cachedList = cache.get("0");
+    if (!cachedList) {
+      log_("RSS Cache: No article list found in cache.");
+      return;
+    }
+
+    const allIds = JSON.parse(cachedList);
+    const top10Ids = allIds.slice(0, 10);
+    const rssItems = [];
+
+    for (const id of top10Ids) {
+      const cachedArticle = cache.get(id);
+      if (!cachedArticle) continue;
+
+      const article = JSON.parse(cachedArticle);
+      const item = {
+        id: article.id,
+        title: article.title,
+        url: `https://freddiefujiwara.com/blog/${article.id}`,
+        content: article.markdown
+      };
+
+      // Check size and truncate if necessary
+      const currentJson = JSON.stringify([...rssItems, item]);
+      if (currentJson.length > 9000) {
+        // Try truncating content
+        const baseItemJson = JSON.stringify([...rssItems, { ...item, content: "" }]);
+        const remainingSpace = 9000 - baseItemJson.length;
+        if (remainingSpace > 10) {
+          item.content = item.content.substring(0, remainingSpace - 10) + "...";
+        } else {
+          item.content = "";
+        }
+
+        // Final check for the truncated item
+        if (JSON.stringify([...rssItems, item]).length > 9000) {
+          break; // Still too big, stop here
+        }
+      }
+
+      rssItems.push(item);
+      if (JSON.stringify(rssItems).length > 9000) {
+        rssItems.pop();
+        break;
+      }
+    }
+
+    if (rssItems.length > 0) {
+      const rssData = JSON.stringify(rssItems);
+      PropertiesService.getScriptProperties().setProperty('RSS_DATA', rssData);
+      log_(`RSS Cache: Saved ${rssItems.length} articles to Properties.`);
+    } else {
+      log_("RSS Cache: No articles to save.");
+    }
+  } catch (e) {
+    log_("RSS Cache Error: " + e.message);
+  }
+}
+
+/**
  * Clear all cache entries used by the application
  */
 export function clearCacheAll() {

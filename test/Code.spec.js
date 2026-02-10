@@ -923,4 +923,77 @@ describe('Code.js', () => {
       expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('saveLog_ error: Storage Full'));
     });
   });
+
+  describe('dailyRSSCache', () => {
+    it('should save RSS items to PropertiesService', () => {
+      const allIds = ['id1', 'id2'];
+      const article1 = { id: 'id1', title: 'Title 1', markdown: 'MD 1' };
+      const article2 = { id: 'id2', title: 'Title 2', markdown: 'MD 2' };
+
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        if (key === 'id1') return JSON.stringify(article1);
+        if (key === 'id2') return JSON.stringify(article2);
+        return null;
+      });
+
+      Code.dailyRSSCache();
+
+      expect(mockProperties.setProperty).toHaveBeenCalledWith(
+        'RSS_DATA',
+        JSON.stringify([
+          { id: 'id1', title: 'Title 1', url: 'https://freddiefujiwara.com/blog/id1', content: 'MD 1' },
+          { id: 'id2', title: 'Title 2', url: 'https://freddiefujiwara.com/blog/id2', content: 'MD 2' },
+        ])
+      );
+    });
+
+    it('should handle missing article list', () => {
+      mockCache.get.mockReturnValue(null);
+      Code.dailyRSSCache();
+      expect(mockProperties.setProperty).not.toHaveBeenCalledWith('RSS_DATA', expect.any(String));
+    });
+
+    it('should truncate content to stay under 9000 characters', () => {
+      const allIds = ['id1'];
+      const longMarkdown = 'a'.repeat(10000);
+      const article1 = { id: 'id1', title: 'Title 1', markdown: longMarkdown };
+
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        if (key === 'id1') return JSON.stringify(article1);
+        return null;
+      });
+
+      Code.dailyRSSCache();
+
+      const call = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA');
+      const savedData = JSON.parse(call[1]);
+      expect(call[1].length).toBeLessThanOrEqual(9000);
+      expect(savedData[0].content).toMatch(/a+\.\.\./);
+    });
+
+    it('should stop adding articles if they cannot fit even without content', () => {
+      const allIds = Array.from({ length: 10 }, (_, i) => `id${i}`);
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        return JSON.stringify({ id: key, title: 'A'.repeat(1000), markdown: 'B' });
+      });
+
+      Code.dailyRSSCache();
+
+      const call = mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA');
+      expect(call[1].length).toBeLessThanOrEqual(9000);
+      const savedData = JSON.parse(call[1]);
+      expect(savedData.length).toBeLessThan(10);
+    });
+
+    it('should log errors', () => {
+      mockCache.get.mockImplementation(() => {
+        throw new Error('Cache fail');
+      });
+      Code.dailyRSSCache();
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('RSS Cache Error: Cache fail'));
+    });
+  });
 });
