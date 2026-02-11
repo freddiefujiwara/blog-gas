@@ -105,9 +105,9 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("Logs cleared");
     });
 
-    it('should save the list and the first 50 documents', () => {
+    it('should save the list and the first 10 documents', () => {
       const mockFiles = [];
-      for (let i = 0; i < 55; i++) {
+      for (let i = 0; i < 15; i++) {
         mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
       }
       let index = 0;
@@ -137,8 +137,8 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
-      // 1 for the list, and up to 50 for the documents
-      expect(mockCache.put).toHaveBeenCalledTimes(51);
+      // 1 for the list, and up to 10 for the documents
+      expect(mockCache.put).toHaveBeenCalledTimes(11);
     });
 
     it('should handle errors during list saving in preCacheAll', () => {
@@ -246,33 +246,30 @@ describe('Code.js', () => {
   });
 
   describe('doGet', () => {
-    it('should return a list of doc IDs and article_cache from cache if available', () => {
-      const allIds = ['id1', 'id2'];
-      const article1 = { id: 'id1', title: 'Title 1', markdown: 'MD 1' };
-      const article2 = { id: 'id2', title: 'Title 2', markdown: 'MD 2' };
+    it('should return a list of doc IDs and article_cache from cache if available (up to 10 articles)', () => {
+      const allIds = Array.from({ length: 15 }, (_, i) => `id${i}`);
+      const articleCacheInMock = {};
+      const expectedArticleCache = [];
+      for (let i = 0; i < 10; i++) {
+        const id = `id${i}`;
+        const article = { id, title: `Title ${i}`, markdown: `MD ${i}` };
+        articleCacheInMock[id] = JSON.stringify(article);
+        expectedArticleCache.push(article);
+      }
 
-      mockCache.get.mockImplementation((key) => {
-        if (key === '0') return JSON.stringify(allIds);
-        return null;
-      });
-      mockCache.getAll.mockReturnValue({
-        'id1': JSON.stringify(article1),
-        'id2': JSON.stringify(article2),
-      });
+      mockCache.get.mockImplementation((key) => (key === '0' ? JSON.stringify(allIds) : null));
+      mockCache.getAll.mockReturnValue(articleCacheInMock);
 
-      const mockTextOutput = {
-        setMimeType: vi.fn().mockReturnThis(),
-      };
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
       mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
 
-      const e = { parameter: {} };
-      Code.doGet(e);
+      Code.doGet({ parameter: {} });
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
-      expect(mockCache.getAll).toHaveBeenCalledWith(['id1', 'id2']);
+      expect(mockCache.getAll).toHaveBeenCalledWith(allIds.slice(0, 10));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
         ids: allIds,
-        article_cache: [article1, article2]
+        article_cache: expectedArticleCache,
       }));
     });
 
@@ -343,6 +340,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<rss version="2.0">'));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>ミニマリストのブログ</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>Title &amp; More</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<description>Content &lt;md&gt;</description>'));
       expect(mockTextOutput.setMimeType).toHaveBeenCalledWith('XML');
