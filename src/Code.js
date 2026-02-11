@@ -12,7 +12,7 @@ export const preCacheAll = () => {
   console.log('Logs cleared');
 
   const cache = CacheService.getScriptCache();
-  const allIds = listDocIdsSortedByName_(FOLDER_ID);
+  const allIds = listDocIdsSortedByTitle_(FOLDER_ID);
   const listPayload = JSON.stringify(allIds);
 
   try {
@@ -47,7 +47,7 @@ export const dailyRSSCache = () => {
   try {
     const cache = CacheService.getScriptCache();
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByName_(FOLDER_ID);
+    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(FOLDER_ID);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
     const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
@@ -141,7 +141,7 @@ const getByteLength_ = s => Utilities.newBlob(s).getBytes().length;
  * Clear all cache entries used by the application
  */
 export const clearCacheAll = () => {
-  const allIds = listDocIdsSortedByName_(FOLDER_ID);
+  const allIds = listDocIdsSortedByTitle_(FOLDER_ID);
   CacheService.getScriptCache().removeAll(['0', ...allIds]);
   console.log('Cache cleared');
 };
@@ -158,7 +158,7 @@ export const doGet = (e) => {
 
   if (!docId) {
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByName_(FOLDER_ID);
+    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(FOLDER_ID);
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
     const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
@@ -170,7 +170,7 @@ export const doGet = (e) => {
         const info = getDocInfoInFolder_(FOLDER_ID, id);
         if (info.exists) {
           const doc = DocumentApp.openById(id);
-          return { id, title: info.name, markdown: docBodyToMarkdown_(doc) };
+          return { id, title: info.title, markdown: docBodyToMarkdown_(doc) };
         }
       } catch (err) {
         log_(`Error fetching article ${id}: ${err.message}`);
@@ -192,20 +192,20 @@ export const doGet = (e) => {
   if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
-  return json_({ id: docId, title: info.name, markdown: docBodyToMarkdown_(doc) });
+  return json_({ id: docId, title: info.title, markdown: docBodyToMarkdown_(doc) });
 };
 
 /** -----------------------------
  *  List: Docs IDs (sorted)
  *  ----------------------------- */
-export const listDocIdsSortedByName_ = (folderId) => {
+export const listDocIdsSortedByTitle_ = (folderId) => {
   const files = DriveApp.getFolderById(folderId).getFilesByType(MimeType.GOOGLE_DOCS);
   const docs = [];
   while (files.hasNext()) {
     const f = files.next();
-    docs.push({ id: f.getId(), name: f.getName() });
+    docs.push({ id: f.getId(), title: f.getName() });
   }
-  return docs.sort((a, b) => b.name.localeCompare(a.name, 'ja')).map(({ id }) => id);
+  return docs.sort((a, b) => b.title.localeCompare(a.title, 'ja')).map(({ id }) => id);
 };
 
 /**
@@ -219,7 +219,7 @@ export const getDocInfoInFolder_ = (folderId, fileId) => {
       const parents = file.getParents();
       while (parents.hasNext()) {
         if (parents.next().getId() === folderId) {
-          return { exists: true, name: file.getName() };
+          return { exists: true, title: file.getName() };
         }
       }
     }
