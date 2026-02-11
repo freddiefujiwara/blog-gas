@@ -24,8 +24,8 @@ export function preCacheAll() {
     console.error("Failed to save list: " + e.message);
   }
 
-  // 2. Save content of first 10 items
-  const targetIds = allIds.slice(0, 10);
+  // 2. Save content of first 50 items (Increased from 10 to support more RSS articles)
+  const targetIds = allIds.slice(0, 50);
   targetIds.forEach(docId => {
     try {
       const doc = DocumentApp.openById(docId);
@@ -46,6 +46,148 @@ export function preCacheAll() {
 }
 
 /**
+ * Create RSS source data (JSON string) and save to PropertiesService.
+ * Split the data into multiple properties (RSS_DATA001, RSS_DATA002, ...)
+ * to overcome the 9KB per-key limit of PropertiesService.
+ */
+export function dailyRSSCache() {
+  try {
+    const cache = CacheService.getScriptCache();
+    let allIds;
+    const cachedList = cache.get("0");
+    if (cachedList) {
+      allIds = JSON.parse(cachedList);
+    } else {
+      log_("RSS Cache: No article list found in cache. Getting from Drive...");
+      allIds = listDocIdsSortedByName_(FOLDER_ID);
+    }
+    const targetIds = allIds.slice(0, 10);
+    const itemsToSave = [];
+
+    for (const id of targetIds) {
+      let article;
+      const cachedArticle = cache.get(id);
+      if (cachedArticle) {
+        article = JSON.parse(cachedArticle);
+      } else {
+        log_(`RSS Cache: Article (ID:${id}) not in cache. Fetching from DocumentApp...`);
+        try {
+          const doc = DocumentApp.openById(id);
+          article = {
+            id: id,
+            title: doc.getName(),
+            markdown: docBodyToMarkdown_(doc)
+          };
+        } catch (e) {
+          log_(`RSS Cache: Failed to fetch article ${id}: ${e.message}`);
+          continue;
+        }
+      }
+
+      const item = {
+        id: article.id,
+        title: article.title,
+        url: `https://freddiefujiwara.com/blog/${article.id}`,
+        content: article.markdown
+      };
+
+      // Ensure single item is under 9KB bytes (using 9000 for safety)
+      let itemStr = JSON.stringify(item);
+      if (getByteLength_(itemStr) > 9000) {
+        // Truncate content until it fits (safe estimation: 3 bytes per Japanese char)
+        // Using a 10-byte margin for safety.
+        const safeChars = Math.floor((9000 - JSON.stringify({ ...item, content: "" }).length - 10) / 3);
+        item.content = item.content.substring(0, Math.max(0, safeChars)) + "...";
+      }
+      itemsToSave.push(item);
+    }
+
+    if (itemsToSave.length === 0) {
+      log_("RSS Cache: No articles to save.");
+      return;
+    }
+
+    // Group items into buckets of 9000 bytes, staying within 450KB total
+    const buckets = [];
+    let currentBucket = [];
+    let totalBytes = 0;
+    const TOTAL_LIMIT = 450000;
+
+    for (const item of itemsToSave) {
+      const nextBucketCandidate = [...currentBucket, item];
+      const nextBucketStr = JSON.stringify(nextBucketCandidate);
+      const nextBucketBytes = getByteLength_(nextBucketStr);
+
+      if (nextBucketBytes > 9000) {
+        if (currentBucket.length > 0) {
+          // Check if adding this bucket exceeds total limit
+          const bucketStr = JSON.stringify(currentBucket);
+          const bucketBytes = getByteLength_(bucketStr);
+          if (totalBytes + bucketBytes > TOTAL_LIMIT) break;
+
+          buckets.push(currentBucket);
+          totalBytes += bucketBytes;
+          currentBucket = [item];
+
+          // If a single item is still over 9000 (though handled above),
+          // we might need to be careful, but handled by getByteLength_ check in next iteration
+        } else {
+          // Single item over 9000 is already truncated to fit 9000 individually
+          if (totalBytes + nextBucketBytes > TOTAL_LIMIT) break;
+          buckets.push([item]);
+          totalBytes += nextBucketBytes;
+          currentBucket = [];
+        }
+      } else {
+        currentBucket.push(item);
+      }
+    }
+    if (currentBucket.length > 0) {
+      const bucketStr = JSON.stringify(currentBucket);
+      if (totalBytes + getByteLength_(bucketStr) <= TOTAL_LIMIT) {
+        buckets.push(currentBucket);
+      }
+    }
+
+    const props = PropertiesService.getScriptProperties();
+
+    // 1. Cleanup old properties based on current index
+    const oldIndexStr = props.getProperty('RSS_DATA');
+    if (oldIndexStr) {
+      try {
+        const oldKeys = JSON.parse(oldIndexStr);
+        if (Array.isArray(oldKeys)) {
+          oldKeys.forEach(k => {
+            if (k !== 'RSS_DATA') props.deleteProperty(k);
+          });
+        }
+      } catch (e) { /* Ignore */ }
+    }
+
+    // 2. Save new chunks
+    const newKeys = [];
+    buckets.forEach((bucket, i) => {
+      const key = `RSS_DATA${(i + 1).toString().padStart(3, '0')}`;
+      props.setProperty(key, JSON.stringify(bucket));
+      newKeys.push(key);
+    });
+
+    // 3. Save index
+    props.setProperty('RSS_DATA', JSON.stringify(newKeys));
+    log_(`RSS Cache: Saved ${itemsToSave.length} articles across ${newKeys.length} properties.`);
+  } catch (e) {
+    log_("RSS Cache Error: " + e.message);
+  }
+}
+
+/**
+ * Helper to get byte length of a string in GAS
+ */
+function getByteLength_(s) {
+  return Utilities.newBlob(s).getBytes().length;
+}
+
+/**
  * Clear all cache entries used by the application
  */
 export function clearCacheAll() {
@@ -62,6 +204,10 @@ export function clearCacheAll() {
  */
 export function doGet(e) {
   const docId = e && e.parameter ? e.parameter.id : null;
+  const output = e && e.parameter ? e.parameter.o : null;
+
+  if (output === 'rss') return generateRSSResponse_();
+
   const cache = CacheService.getScriptCache();
 
   // --- Case A: No ID (Get list + article_cache) ---
@@ -76,11 +222,12 @@ export function doGet(e) {
       allIds = listDocIdsSortedByName_(FOLDER_ID);
     }
 
-    const top10Ids = allIds.slice(0, 10);
-    const cachedArticles = cache.getAll(top10Ids);
+    // Return up to 50 articles (Increased from 10)
+    const targetIds = allIds.slice(0, 50);
+    const cachedArticles = cache.getAll(targetIds);
     const articleCache = [];
 
-    top10Ids.forEach(id => {
+    targetIds.forEach(id => {
       if (cachedArticles[id]) {
         articleCache.push(JSON.parse(cachedArticles[id]));
       } else {
@@ -371,6 +518,61 @@ export function escapeMdInline_(s) {
 export function escapeMdTable_(s) {
   // Do not break Markdown table separator
   return s.replace(/\|/g, '\\|');
+}
+
+/** -----------------------------
+ *  RSS helpers
+ *  ----------------------------- */
+function generateRSSResponse_() {
+  const props = PropertiesService.getScriptProperties();
+  const indexStr = props.getProperty('RSS_DATA');
+  let items = [];
+  if (indexStr) {
+    try {
+      const keys = JSON.parse(indexStr);
+      keys.forEach(key => {
+        const chunk = props.getProperty(key);
+        if (chunk) {
+          const parsed = JSON.parse(chunk);
+          if (Array.isArray(parsed)) {
+            items = items.concat(parsed);
+          }
+        }
+      });
+    } catch (e) {
+      log_("RSS Generation Error: " + e.message);
+    }
+  }
+
+  let rss = '<?xml version="1.0" encoding="UTF-8"?>\n';
+  rss += '<rss version="2.0">\n';
+  rss += '  <channel>\n';
+  rss += '    <title>Freddie Fujiwara\'s Blog</title>\n';
+  rss += '    <link>https://freddiefujiwara.com/blog</link>\n';
+  rss += '    <description>Recent articles from Freddie Fujiwara\'s Blog</description>\n';
+
+  items.forEach(item => {
+    rss += '    <item>\n';
+    rss += `      <title>${escapeXml_(item.title)}</title>\n`;
+    rss += `      <link>${escapeXml_(item.url)}</link>\n`;
+    rss += `      <description>${escapeXml_(item.content)}</description>\n`;
+    rss += `      <guid>${escapeXml_(item.url)}</guid>\n`;
+    rss += '    </item>\n';
+  });
+
+  rss += '  </channel>\n';
+  rss += '</rss>';
+
+  return ContentService.createTextOutput(rss).setMimeType(ContentService.MimeType.XML);
+}
+
+function escapeXml_(s) {
+  if (!s) return "";
+  return s.replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 /** -----------------------------
