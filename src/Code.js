@@ -1,6 +1,8 @@
 export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
+export const PRE_CACHE_LIMIT = 10;
+export const RSS_CACHE_LIMIT = 50;
 
 /**
  * [Batch Process] Run periodically to update properties
@@ -22,7 +24,7 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  for (const id of allIds.slice(0, 10)) {
+  for (const id of allIds.slice(0, PRE_CACHE_LIMIT)) {
     try {
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
@@ -48,7 +50,7 @@ export const dailyRSSCache = () => {
     const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByName_(FOLDER_ID);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
-    const itemsToSave = allIds.slice(0, 10).map((id) => {
+    const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
       const cachedArticle = cache.get(id);
       if (cachedArticle) return JSON.parse(cachedArticle);
       log_(`RSS Cache: Article (ID:${id}) not in cache. Fetching from DocumentApp...`);
@@ -159,7 +161,7 @@ export const doGet = (e) => {
     const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByName_(FOLDER_ID);
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
-    const targetIds = allIds.slice(0, 10);
+    const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
     const cachedArticles = cache.getAll(targetIds);
     const articleCache = targetIds.map((id) => {
       if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
