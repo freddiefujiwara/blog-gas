@@ -547,7 +547,7 @@ function generateRSSResponse_() {
   let rss = '<?xml version="1.0" encoding="UTF-8"?>\n';
   rss += '<rss version="2.0">\n';
   rss += '  <channel>\n';
-  rss += '    <title>Freddie Fujiwara\'s Blog</title>\n';
+  rss += '    <title>ミニマリストのブログ</title>\n';
   rss += '    <link>https://freddiefujiwara.com/blog</link>\n';
   rss += '    <description>Recent articles from Freddie Fujiwara\'s Blog</description>\n';
 

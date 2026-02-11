@@ -343,6 +343,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<rss version="2.0">'));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>ミニマリストのブログ</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>Title &amp; More</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<description>Content &lt;md&gt;</description>'));
       expect(mockTextOutput.setMimeType).toHaveBeenCalledWith('XML');
