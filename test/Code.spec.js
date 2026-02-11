@@ -105,9 +105,9 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("Logs cleared");
     });
 
-    it('should save the list and the first 10 documents', () => {
+    it('should save the list and the first PRE_CACHE_LIMIT documents', () => {
       const mockFiles = [];
-      for (let i = 0; i < 15; i++) {
+      for (let i = 0; i < Code.PRE_CACHE_LIMIT + 5; i++) {
         mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
       }
       let index = 0;
@@ -137,8 +137,8 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
-      // 1 for the list, and up to 10 for the documents
-      expect(mockCache.put).toHaveBeenCalledTimes(11);
+      // 1 for the list, and up to PRE_CACHE_LIMIT for the documents
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 1);
     });
 
     it('should handle errors during list saving in preCacheAll', () => {
@@ -266,7 +266,7 @@ describe('Code.js', () => {
       Code.doGet({ parameter: {} });
 
       expect(mockCache.get).toHaveBeenCalledWith('0');
-      expect(mockCache.getAll).toHaveBeenCalledWith(allIds.slice(0, 10));
+      expect(mockCache.getAll).toHaveBeenCalledWith(allIds.slice(0, Code.PRE_CACHE_LIMIT));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
         ids: allIds,
         article_cache: expectedArticleCache,
@@ -1004,9 +1004,9 @@ describe('Code.js', () => {
       expect(savedChunk[0].content).toMatch(/あ+\.\.\./);
     });
 
-    it('should group multiple articles into buckets appropriately but limit to 10', () => {
-      const allIds = Array.from({ length: 15 }, (_, i) => `id${i}`);
-      // Each article is small enough to fit many in one bucket, but we check if it processes exactly 10
+    it('should group multiple articles into buckets appropriately but limit to RSS_CACHE_LIMIT', () => {
+      const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
+      // Each article is small enough to fit many in one bucket, but we check if it processes exactly RSS_CACHE_LIMIT
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
         return JSON.stringify({ id: key, title: 'Title', markdown: 'short' });
@@ -1017,11 +1017,11 @@ describe('Code.js', () => {
 
       const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
       const firstChunk = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === savedDataKeys[0])[1]);
-      expect(firstChunk.length).toBe(10);
+      expect(firstChunk.length).toBe(Code.RSS_CACHE_LIMIT);
     });
 
     it('should respect TOTAL_LIMIT (450KB)', () => {
-      const allIds = Array.from({ length: 20 }, (_, i) => `id${i}`);
+      const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
       // Each article ~9000 bytes.
       const largeMarkdown = 'あ'.repeat(2900);
       mockCache.get.mockImplementation((key) => {
@@ -1033,8 +1033,8 @@ describe('Code.js', () => {
       Code.dailyRSSCache();
 
       const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
-      // Should still be limited to 10 articles total because of the slice
-      expect(savedDataKeys.length).toBeLessThanOrEqual(10);
+      // Should still be limited to RSS_CACHE_LIMIT articles total because of the slice
+      expect(savedDataKeys.length).toBeLessThanOrEqual(Code.RSS_CACHE_LIMIT);
     });
 
     it('should cleanup old properties', () => {
