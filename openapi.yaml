@@ -11,8 +11,9 @@ paths:
     get:
       summary: Get document list or a specific document content
       description: |
-        If no `id` is provided, returns a list of all document IDs in the folder and preloaded content for the first 10 documents.
-        If an `id` is provided, returns the content of that specific document.
+        - If no parameters are provided, returns a list of all document IDs in the folder and preloaded content for the first 10 documents.
+        - If an `id` is provided, returns the content of that specific document.
+        - If `o=rss` is provided, returns an RSS 2.0 feed of the latest 50 articles.
       parameters:
         - name: id
           in: query
@@ -20,9 +21,16 @@ paths:
           required: false
           schema:
             type: string
+        - name: o
+          in: query
+          description: Output format. Set to 'rss' for RSS feed.
+          required: false
+          schema:
+            type: string
+            enum: [rss]
       responses:
         '200':
-          description: Successful response. Returns either a list of documents or a single document's content.
+          description: Successful response. Returns document list, document content, or RSS feed.
           content:
             application/json:
               schema:
@@ -30,6 +38,10 @@ paths:
                   - $ref: '#/components/schemas/ArticleListResponse'
                   - $ref: '#/components/schemas/ArticleResponse'
                   - $ref: '#/components/schemas/ErrorResponse'
+            application/xml:
+              schema:
+                type: string
+                description: RSS 2.0 XML feed.
 components:
   schemas:
     ArticleListResponse:

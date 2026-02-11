@@ -48,6 +48,9 @@ The script runs as a Web App.
    }
    ```
 
+3. **Get RSS Feed**:
+   Visit `WEB_APP_URL?o=rss`. It returns an RSS 2.0 XML feed of the latest 50 documents.
+
 ## API Specification
 
 The API is documented using the OpenAPI Specification. You can find the definition in [openapi.yaml](./openapi.yaml).
