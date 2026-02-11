@@ -62,7 +62,7 @@ Here are the main parts of the code:
 - `preCacheAll()`: A batch processing function intended to be run via a time-driven trigger. It clears old debug logs, saves the list of documents and the content of the top 10 documents to script properties to improve API performance.
 - `clearCacheAll()`: Clears all cache entries used by the application, including the document list and individual document contents.
 - `doGet(e)`: This is the main function for the Web API. It retrieves content from script properties if available; otherwise, it fetches the data directly and saves it to properties for future use. It decides to either list files or convert a file based on the `id` parameter.
-- `listDocIdsSortedByName_`: This function finds all Google Docs in your folder and sorts them by their names.
+- `listDocIdsSortedByTitle_`: This function finds all Google Docs in your folder and sorts them by their titles.
 - `getDocInfoInFolder_`: Verifies if a document exists within the specified folder and retrieves its metadata.
 - `docBodyToMarkdown_`: This is the main engine. It reads the Google Doc and turns it into Markdown text.
 - `elementToMarkdown_`: This part looks at each piece of the document (like a paragraph or a table) and decides how to convert it.
