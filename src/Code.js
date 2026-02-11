@@ -22,7 +22,7 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  for (const id of allIds.slice(0, 50)) {
+  for (const id of allIds.slice(0, 10)) {
     try {
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
@@ -159,7 +159,7 @@ export const doGet = (e) => {
     const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByName_(FOLDER_ID);
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
-    const targetIds = allIds.slice(0, 50);
+    const targetIds = allIds.slice(0, 10);
     const cachedArticles = cache.getAll(targetIds);
     const articleCache = targetIds.map((id) => {
       if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
