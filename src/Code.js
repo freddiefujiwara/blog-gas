@@ -1,4 +1,17 @@
-export const FOLDER_ID = '1w5ZaeLB1mfwCgoXO2TWp9JSkWFNnt7mq';
+/**
+ * Site settings come from Script Properties, so the same code can be
+ * reused for another site by changing the properties only.
+ * Set them in Project Settings > Script Properties (see README "Setup").
+ */
+export const getConfig_ = () => {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    folderId: props.getProperty('FOLDER_ID') || '',
+    siteTitle: props.getProperty('SITE_TITLE') || 'Blog',
+    siteUrl: (props.getProperty('SITE_URL') || '').replace(/\/+$/, ''),
+    siteDescription: props.getProperty('SITE_DESCRIPTION') || 'Recent articles',
+  };
+};
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
@@ -13,7 +26,7 @@ export const preCacheAll = () => {
   console.log('Logs cleared');
 
   const cache = CacheService.getScriptCache();
-  const allIds = listDocIdsSortedByTitle_(FOLDER_ID);
+  const allIds = listDocIdsSortedByTitle_(getConfig_().folderId);
   const listPayload = JSON.stringify(allIds);
 
   try {
@@ -48,7 +61,7 @@ export const dailyRSSCache = () => {
   try {
     const cache = CacheService.getScriptCache();
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(FOLDER_ID);
+    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(getConfig_().folderId);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
     const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
@@ -66,7 +79,7 @@ export const dailyRSSCache = () => {
       const item = {
         id: article.id,
         title: article.title,
-        url: `https://freddiefujiwara.com/blog/${article.id}`,
+        url: `${getConfig_().siteUrl}/${article.id}`,
         content: article.markdown,
       };
       if (getByteLength_(JSON.stringify(item)) > 9000) {
@@ -142,7 +155,7 @@ const getByteLength_ = s => Utilities.newBlob(s).getBytes().length;
  * Clear all cache entries used by the application
  */
 export const clearCacheAll = () => {
-  const allIds = listDocIdsSortedByTitle_(FOLDER_ID);
+  const allIds = listDocIdsSortedByTitle_(getConfig_().folderId);
   CacheService.getScriptCache().removeAll(['0', ...allIds]);
   console.log('Cache cleared');
 };
@@ -159,7 +172,7 @@ export const doGet = (e) => {
 
   if (!docId) {
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(FOLDER_ID);
+    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(getConfig_().folderId);
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
     const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
@@ -168,7 +181,7 @@ export const doGet = (e) => {
       if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
       log_(`Article (ID:${id}) not in cache. Fetching...`);
       try {
-        const info = getDocInfoInFolder_(FOLDER_ID, id);
+        const info = getDocInfoInFolder_(getConfig_().folderId, id);
         if (info.exists) {
           const doc = DocumentApp.openById(id);
           return { id, title: info.title, markdown: docBodyToMarkdown_(doc) };
@@ -189,7 +202,7 @@ export const doGet = (e) => {
   }
 
   log_(`Document (ID:${docId}) not in cache. Generating...`);
-  const info = getDocInfoInFolder_(FOLDER_ID, docId);
+  const info = getDocInfoInFolder_(getConfig_().folderId, docId);
   if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
@@ -235,7 +248,7 @@ let imageFolder_ = null;
 
 export const getImageFolder_ = () => {
   if (imageFolder_) return imageFolder_;
-  const parent = DriveApp.getFolderById(FOLDER_ID);
+  const parent = DriveApp.getFolderById(getConfig_().folderId);
   const folders = parent.getFoldersByName(IMAGE_FOLDER_NAME);
   imageFolder_ = folders.hasNext() ? folders.next() : parent.createFolder(IMAGE_FOLDER_NAME);
   return imageFolder_;
@@ -438,9 +451,9 @@ const generateRSSResponse_ = () => {
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
-    <title>藤原史和｜川口を歩くQAエンジニア</title>
-    <link>https://freddiefujiwara.com/blog</link>
-    <description>Recent articles from Freddie Fujiwara's Blog</description>
+    <title>${escapeXml_(getConfig_().siteTitle)}</title>
+    <link>${escapeXml_(getConfig_().siteUrl)}</link>
+    <description>${escapeXml_(getConfig_().siteDescription)}</description>
 ${itemsXml}  </channel>
 </rss>`;
 

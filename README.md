@@ -15,6 +15,46 @@ The frontend source code that consumes this API can be found at: https://github.
   - Links
   - Inline images (exported to a shared `images` folder in Drive and embedded as Markdown image links)
 
+## Setup
+
+You can use this code for your own blog. You do not need to change the code.
+You only set some values in the project settings. These values are called
+"Script Properties".
+
+### Step 1: Make a folder
+
+1. Open Google Drive.
+2. Make a new folder.
+3. Put your Google Docs in the folder. These Docs are your blog posts.
+4. Open the folder. Look at the web address (URL) in your browser.
+   The last part of the URL is the folder ID. Copy it.
+
+### Step 2: Set the Script Properties
+
+1. Open your project on script.google.com.
+2. Click **Project Settings** (the gear icon on the left).
+3. Find **Script Properties** and click **Add script property**.
+4. Add these four properties, one by one:
+
+| Property | Value | What it is |
+| --- | --- | --- |
+| `FOLDER_ID` | The folder ID from Step 1 | The folder with your Docs |
+| `SITE_TITLE` | Example: `My Blog` | The name of your blog. It is used in the RSS feed |
+| `SITE_URL` | Example: `https://example.com/blog` | The web address of your blog. Do not add `/` at the end |
+| `SITE_DESCRIPTION` | Example: `My blog posts` | A short text about your blog. It is used in the RSS feed |
+
+5. Click **Save script properties**.
+
+### Step 3: Deploy
+
+1. Click **Deploy** and then **New deployment**.
+2. Choose **Web app** as the type.
+3. Set **Who has access** to **Anyone**.
+4. Click **Deploy**. Now your API is ready.
+
+If you change a value later, only change the Script Property.
+You do not need to change the code or deploy again.
+
 ## How to use
 
 The script runs as a Web App.
