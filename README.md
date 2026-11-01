@@ -13,6 +13,7 @@ The frontend source code that consumes this API can be found at: https://github.
   - Tables
   - Bold and Italic text
   - Links
+  - Inline images (exported to a shared `images` folder in Drive and embedded as Markdown image links)
 
 ## How to use
 
@@ -74,7 +75,10 @@ Here are the main parts of the code:
 - `tableToMarkdown_`: This turns Google Doc tables into Markdown tables.
 - `headingToPrefix_`: Helper to convert paragraph heading levels to Markdown prefixes (#, ##, etc.).
 - `isOrderedGlyph_`: Helper to determine if a list item's glyph type suggests an ordered list.
-- `paragraphTextWithInlineStyles_`: This looks for **bold**, *italic*, and [links] inside the text.
+- `paragraphTextWithInlineStyles_`: This looks for **bold**, *italic*, and [links] inside the text. Inline images are converted via `inlineImageToMarkdown_`.
+- `getImageFolder_`: Finds (or creates) the `images` subfolder inside the documents folder, where exported images are stored.
+- `exportInlineImage_`: Saves an inline image to the images folder under a content-hash file name (so the same image is exported only once), shares it as anyone-with-the-link, and returns its public URL.
+- `inlineImageToMarkdown_`: Converts an inline image into Markdown image syntax using the exported URL and the image's alt description.
 - `escapeMdInline_`: Escapes special characters like backslashes and backticks in inline text for Markdown.
 - `escapeMdTable_`: Escapes pipes in table cells for Markdown.
 - `json_`: A helper to send the data back in JSON format.

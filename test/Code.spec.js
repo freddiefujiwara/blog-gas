@@ -21,6 +21,8 @@ const mockContentService = {
 const mockDriveApp = {
   getFolderById: vi.fn(),
   getFileById: vi.fn(),
+  Access: { ANYONE_WITH_LINK: 'ANYONE_WITH_LINK' },
+  Permission: { VIEW: 'VIEW' },
 };
 
 const mockProperties = {
@@ -35,6 +37,8 @@ const mockPropertiesService = {
 
 const mockUtilities = {
   formatDate: vi.fn(),
+  computeDigest: vi.fn().mockReturnValue([0, 15, 255, -1]),
+  DigestAlgorithm: { MD5: 'MD5' },
   newBlob: vi.fn().mockImplementation((s) => ({
     getBytes: () => {
       let bytes = 0;
@@ -54,6 +58,7 @@ const mockDocumentApp = {
     TABLE: 'TABLE',
     HORIZONTAL_RULE: 'HORIZONTAL_RULE',
     TEXT: 'TEXT',
+    INLINE_IMAGE: 'INLINE_IMAGE',
   },
   ParagraphHeading: {
     NORMAL: 'NORMAL',
@@ -545,6 +550,67 @@ describe('Code.js', () => {
           }),
         };
         expect(Code.paragraphToMarkdown_(mockP)).toBe('Normal Paragraph\n');
+      });
+    });
+
+    describe('inline images', () => {
+      const mockBlob = {
+        getBytes: () => [1, 2, 3],
+        getContentType: () => 'image/png',
+        setName: vi.fn().mockReturnThis(),
+      };
+      const mockImage = {
+        getBlob: () => mockBlob,
+        getAltDescription: () => 'テスト画像',
+      };
+      const mockSharedFile = { getId: () => 'file123', setSharing: vi.fn() };
+      const mockImageFolder = {
+        getFilesByName: vi.fn(),
+        createFile: vi.fn().mockReturnValue(mockSharedFile),
+      };
+      const emptyIterator = { hasNext: () => false, next: () => null };
+      const oneFileIterator = { hasNext: () => true, next: () => ({ getId: () => 'existing42' }) };
+
+      const setupDrive = () => {
+        mockDriveApp.getFolderById.mockReturnValue({
+          getFoldersByName: vi.fn().mockReturnValue({ hasNext: () => true, next: () => mockImageFolder }),
+        });
+      };
+
+      it('should export a new image to Drive, share it, and return its URL', () => {
+        setupDrive();
+        mockImageFolder.getFilesByName.mockReturnValue(emptyIterator);
+        const url = Code.exportInlineImage_(mockImage);
+        expect(url).toBe('https://lh3.googleusercontent.com/d/file123');
+        expect(mockBlob.setName).toHaveBeenCalledWith('img-000fffff.png');
+        expect(mockImageFolder.createFile).toHaveBeenCalled();
+        expect(mockSharedFile.setSharing).toHaveBeenCalledWith('ANYONE_WITH_LINK', 'VIEW');
+      });
+
+      it('should reuse an already exported image with the same content', () => {
+        mockImageFolder.getFilesByName.mockReturnValue(oneFileIterator);
+        mockImageFolder.createFile.mockClear();
+        const url = Code.exportInlineImage_(mockImage);
+        expect(url).toBe('https://lh3.googleusercontent.com/d/existing42');
+        expect(mockImageFolder.createFile).not.toHaveBeenCalled();
+      });
+
+      it('should render an image-only paragraph as image markdown', () => {
+        mockImageFolder.getFilesByName.mockReturnValue(oneFileIterator);
+        const mockP = {
+          getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.INLINE_IMAGE,
+            asInlineImage: () => mockImage,
+          }),
+        };
+        expect(Code.paragraphToMarkdown_(mockP)).toBe('![テスト画像](https://lh3.googleusercontent.com/d/existing42)\n');
+      });
+
+      it('should return empty string when the image export fails', () => {
+        const badImage = { getBlob: () => { throw new Error('no blob'); }, getAltDescription: () => '' };
+        expect(Code.inlineImageToMarkdown_(badImage)).toBe('');
       });
     });
 
