@@ -3,6 +3,7 @@ export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
 export const RSS_CACHE_LIMIT = 50;
+export const IMAGE_FOLDER_NAME = 'images';
 
 /**
  * [Batch Process] Run periodically to update properties
@@ -228,6 +229,46 @@ export const getDocInfoInFolder_ = (folderId, fileId) => {
 };
 
 /** -----------------------------
+ *  Inline images: export to Drive and embed as Markdown
+ *  ----------------------------- */
+let imageFolder_ = null;
+
+export const getImageFolder_ = () => {
+  if (imageFolder_) return imageFolder_;
+  const parent = DriveApp.getFolderById(FOLDER_ID);
+  const folders = parent.getFoldersByName(IMAGE_FOLDER_NAME);
+  imageFolder_ = folders.hasNext() ? folders.next() : parent.createFolder(IMAGE_FOLDER_NAME);
+  return imageFolder_;
+};
+
+export const imageUrl_ = (fileId) => `https://lh3.googleusercontent.com/d/${fileId}`;
+
+export const exportInlineImage_ = (image) => {
+  const blob = image.getBlob();
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, blob.getBytes())
+    .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+  const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' })[blob.getContentType()] || 'png';
+  const name = `img-${digest}.${ext}`;
+  const folder = getImageFolder_();
+  const existing = folder.getFilesByName(name);
+  if (existing.hasNext()) return imageUrl_(existing.next().getId());
+  const file = folder.createFile(blob.setName(name));
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return imageUrl_(file.getId());
+};
+
+export const inlineImageToMarkdown_ = (image) => {
+  try {
+    const url = exportInlineImage_(image);
+    const alt = (image.getAltDescription() || '').replace(/[\[\]\n]/g, ' ').trim();
+    return `\n\n![${alt}](${url})\n\n`;
+  } catch (e) {
+    log_(`Image export failed: ${e.message}`);
+    return '';
+  }
+};
+
+/** -----------------------------
  *  Markdown conversion (best-effort)
  *  ----------------------------- */
 export const docBodyToMarkdown_ = (doc) => {
@@ -316,6 +357,10 @@ export const paragraphTextWithInlineStyles_ = (p) => {
 
   for (let i = 0; i < p.getNumChildren(); i++) {
     const child = p.getChild(i);
+    if (child.getType() === DocumentApp.ElementType.INLINE_IMAGE) {
+      out.push(inlineImageToMarkdown_(child.asInlineImage()));
+      continue;
+    }
     if (child.getType() !== DocumentApp.ElementType.TEXT) continue;
 
     const textEl = child.asText();
