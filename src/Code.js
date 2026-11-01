@@ -438,7 +438,7 @@ const generateRSSResponse_ = () => {
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
-    <title>ミニマリストのブログ</title>
+    <title>藤原史和｜川口を歩くQAエンジニア</title>
     <link>https://freddiefujiwara.com/blog</link>
     <description>Recent articles from Freddie Fujiwara's Blog</description>
 ${itemsXml}  </channel>
