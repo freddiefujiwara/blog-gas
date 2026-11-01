@@ -21,6 +21,9 @@ You can use this code for your own blog. You do not need to change the code.
 You only set some values in the project settings. These values are called
 "Script Properties".
 
+This setup is for beginners. You do everything in your web browser.
+You do not need to install anything on your computer.
+
 ### Step 1: Make a folder
 
 1. Open Google Drive.
@@ -29,12 +32,30 @@ You only set some values in the project settings. These values are called
 4. Open the folder. Look at the web address (URL) in your browser.
    The last part of the URL is the folder ID. Copy it.
 
-### Step 2: Set the Script Properties
+### Step 2: Make the Apps Script project
 
-1. Open your project on script.google.com.
-2. Click **Project Settings** (the gear icon on the left).
-3. Find **Script Properties** and click **Add script property**.
-4. Add these four properties, one by one:
+1. Open [script.google.com](https://script.google.com).
+   Sign in with the same Google account as your folder in Step 1.
+2. Click **New project**.
+3. The editor opens. There is a file called `Code.gs` with small sample code.
+   Select all of the sample code and delete it.
+4. In this repository on GitHub, open the file `dist/Code.gs`.
+   Click the **Copy raw file** button at the top right of the file
+   to copy all of the code.
+5. Go back to the editor. Paste the code into `Code.gs`.
+6. Click the save icon (or press Ctrl+S, or Cmd+S on a Mac).
+7. Click the project name ("Untitled project") at the top of the page.
+   Give the project a name, for example `My Blog API`.
+
+Note: The first time you deploy or run the project, Google asks you
+if the project can access your data. This is normal.
+The project runs under your own account. Follow the screens and allow it.
+
+### Step 3: Set the Script Properties
+
+1. Click **Project Settings** (the gear icon on the left).
+2. Find **Script Properties** and click **Add script property**.
+3. Add these four properties, one by one:
 
 | Property | Value | What it is |
 | --- | --- | --- |
@@ -43,14 +64,36 @@ You only set some values in the project settings. These values are called
 | `SITE_URL` | Example: `https://example.com/blog` | The web address of your blog. Do not add `/` at the end |
 | `SITE_DESCRIPTION` | Example: `My blog posts` | A short text about your blog. It is used in the RSS feed |
 
-5. Click **Save script properties**.
+4. Click **Save script properties**.
 
-### Step 3: Deploy
+### Step 4: Deploy
 
 1. Click **Deploy** and then **New deployment**.
 2. Choose **Web app** as the type.
 3. Set **Who has access** to **Anyone**.
 4. Click **Deploy**. Now your API is ready.
+5. Copy the **Web App URL**. It looks like this:
+   `https://script.google.com/macros/s/xxxxx/exec`
+   You need this URL when you set up the front side (the web page).
+
+### Step 5: Set up the automatic updates (triggers)
+
+The blog updates itself with two timers. They are called "triggers".
+
+1. Click **Triggers** (the clock icon on the left).
+2. Click **Add Trigger**.
+   - Choose `preCacheAll` as the function.
+   - Choose **Time-driven** as the event source.
+   - Choose **Minutes timer** and **Every 10 minutes**.
+   - Click **Save**.
+3. Click **Add Trigger** again.
+   - Choose `dailyRSSCache` as the function.
+   - Choose **Time-driven** as the event source.
+   - Choose **Day timer** and a time (for example, midnight to 1am).
+   - Click **Save**.
+
+The first timer keeps the list of posts new.
+The second timer keeps the RSS feed new.
 
 If you change a value later, only change the Script Property.
 You do not need to change the code or deploy again.
@@ -126,7 +169,14 @@ Here are the main parts of the code:
 - `saveLog_(msg)`: Appends a log message with a JST timestamp to the `DEBUG_LOGS` script property (limited to 9000 characters).
 - `log_(msg)`: A wrapper that outputs a log message to both `console.log` and the `DEBUG_LOGS` script property.
 
-## How to setup and deploy
+## For developers: setup and deploy with your computer
+
+This section is for people who write code. Beginners can use the Setup
+section above and do not need this section.
+
+Note: The `dist/` folder is in this repository on purpose.
+Beginners copy the code from `dist/Code.gs`, so after you change the code
+in `src/`, run `npm run build` and commit the new `dist/` files too.
 
 1. **Install dependencies**:
    ```bash
