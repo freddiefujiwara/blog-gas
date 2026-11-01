@@ -35,6 +35,14 @@ const mockPropertiesService = {
   getScriptProperties: vi.fn().mockReturnValue(mockProperties),
 };
 
+const TEST_FOLDER_ID = 'test-folder-id';
+const TEST_CONFIG = {
+  FOLDER_ID: TEST_FOLDER_ID,
+  SITE_TITLE: 'Test Blog',
+  SITE_URL: 'https://example.com/blog',
+  SITE_DESCRIPTION: 'Test description',
+};
+
 const mockUtilities = {
   formatDate: vi.fn(),
   computeDigest: vi.fn().mockReturnValue([0, 15, 255, -1]),
@@ -96,6 +104,7 @@ global.console = {
 describe('Code.js', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
   });
 
   describe('preCacheAll', () => {
@@ -298,7 +307,7 @@ describe('Code.js', () => {
       // Mock getDocInfoInFolder_ and openById for the article fetch
       const mockParentsIterator = {
         hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
-        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
+        next: vi.fn().mockReturnValue({ getId: () => TEST_FOLDER_ID }),
       };
       const mockFile = {
         getMimeType: () => mockMimeType.GOOGLE_DOCS,
@@ -323,7 +332,7 @@ describe('Code.js', () => {
       const e = { parameter: {} };
       Code.doGet(e);
 
-      expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(Code.FOLDER_ID);
+      expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(TEST_FOLDER_ID);
       expect(mockCache.put).not.toHaveBeenCalled();
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
     });
@@ -333,7 +342,7 @@ describe('Code.js', () => {
       mockProperties.getProperty.mockImplementation((key) => {
         if (key === 'RSS_DATA') return JSON.stringify(['RSS_DATA001']);
         if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
-        return null;
+        return TEST_CONFIG[key] ?? null;
       });
 
       const mockTextOutput = {
@@ -345,7 +354,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<rss version="2.0">'));
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>藤原史和｜川口を歩くQAエンジニア</title>'));
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>Test Blog</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<title>Title &amp; More</title>'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<description>Content &lt;md&gt;</description>'));
       expect(mockTextOutput.setMimeType).toHaveBeenCalledWith('XML');
@@ -361,7 +370,7 @@ describe('Code.js', () => {
           getMimeType: () => mockMimeType.GOOGLE_DOCS,
           getParents: () => ({
             hasNext: () => true,
-            next: () => ({ getId: () => Code.FOLDER_ID })
+            next: () => ({ getId: () => TEST_FOLDER_ID })
           }),
           getName: () => 'Doc ' + id
         };
@@ -446,7 +455,7 @@ describe('Code.js', () => {
 
       const mockParentsIterator = {
         hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
-        next: vi.fn().mockReturnValue({ getId: () => Code.FOLDER_ID }),
+        next: vi.fn().mockReturnValue({ getId: () => TEST_FOLDER_ID }),
       };
       const mockFile = {
         getMimeType: () => mockMimeType.GOOGLE_DOCS,
