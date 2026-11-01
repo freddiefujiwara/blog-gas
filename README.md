@@ -39,9 +39,10 @@ You do not need to install anything on your computer.
 2. Click **New project**.
 3. The editor opens. There is a file called `Code.gs` with small sample code.
    Select all of the sample code and delete it.
-4. In this repository on GitHub, open the file `dist/Code.gs`.
-   Click the **Copy raw file** button at the top right of the file
-   to copy all of the code.
+4. Download the ready-made code file from this repository's
+   **Releases** page:
+   https://github.com/freddiefujiwara/blog-gas/releases/latest
+   Download `Code.gs`, open it, and copy all of the code.
 5. Go back to the editor. Paste the code into `Code.gs`.
 6. Click the save icon (or press Ctrl+S, or Cmd+S on a Mac).
 7. Click the project name ("Untitled project") at the top of the page.
@@ -174,9 +175,10 @@ Here are the main parts of the code:
 This section is for people who write code. Beginners can use the Setup
 section above and do not need this section.
 
-Note: The `dist/` folder is in this repository on purpose.
-Beginners copy the code from `dist/Code.gs`, so after you change the code
-in `src/`, run `npm run build` and commit the new `dist/` files too.
+Note: `dist/` is build output and is not kept in this repository.
+Beginners download `Code.gs` from the GitHub Releases page instead,
+so when the code changes, publish a new release with the new
+`dist/Code.gs` file attached.
 
 1. **Install dependencies**:
    ```bash
