@@ -37,6 +37,59 @@ export const authorize = () => {
 };
 
 /**
+ * [Manual] Diagnose link cards on the newest document. Logs, for each
+ * standalone link: the raw OG cache entry, a direct fetch probe that
+ * bypasses the cache (status code and the parsed OG title/image), and
+ * how many cards a fresh conversion emits. Read the result in the
+ * execution log or in the DEBUG_LOGS script property.
+ */
+export const debugOg = () => {
+  const ids = listDocIdsSortedByTitle_(getConfig_().folderId);
+  if (!ids.length) {
+    log_('OG debug: no documents found');
+    return;
+  }
+  const doc = DocumentApp.openById(ids[0]);
+  const body = doc.getBody();
+  const urls = [];
+  for (let i = 0; i < body.getNumChildren(); i++) {
+    const el = body.getChild(i);
+    if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
+      const url = standaloneLinkUrl_(el.asParagraph());
+      if (url && !urls.includes(url)) urls.push(url);
+    }
+  }
+  log_(`OG debug: doc=${doc.getName()} targets=${urls.length}`);
+  const cache = CacheService.getScriptCache();
+  urls.forEach((url) => {
+    const raw = cache.get(ogCacheKey_(url));
+    log_(`OG debug cache: ${url} -> ${raw ? String(raw).slice(0, 200) : 'MISS'}`);
+    try {
+      const res = UrlFetchApp.fetch(url, {
+        headers: {
+          Range: 'bytes=0-65535',
+          'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
+        },
+        muteHttpExceptions: true,
+        followRedirects: true,
+      });
+      let text = '';
+      try {
+        text = res.getContentText() || '';
+      } catch (e) {
+        log_(`OG debug probe: ${url} contentText error: ${e.message}`);
+      }
+      const parsed = text ? parseOgData_(text, url) : null;
+      log_(`OG debug probe: ${url} status=${res.getResponseCode()} bytes=${text.length} title=${parsed ? parsed.title : ''} image=${parsed ? parsed.image : ''}`);
+    } catch (e) {
+      log_(`OG debug probe: ${url} failed: ${e.message}`);
+    }
+  });
+  const markdown = docBodyToMarkdown_(doc);
+  log_(`OG debug: cards in markdown = ${(markdown.match(/link-card/g) || []).length}`);
+};
+
+/**
  * [Batch Process] Run periodically to update properties
  */
 export const preCacheAll = () => {
