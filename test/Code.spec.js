@@ -1285,6 +1285,32 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('cards in markdown ='));
     });
 
+    it('probes header variants for a Rakuten ROOM target', () => {
+      const ROOM_URL = 'https://room.rakuten.co.jp/freddiefujiwara/1700000000000000';
+      const paragraph = linkPara([textChild(ROOM_URL, { LINK_URL: ROOM_URL })]);
+      const file = { getId: () => 'doc1', getName: () => '2026-01-01 Test' };
+      const iterator = { hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false), next: () => file };
+      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
+      mockDocumentApp.openById.mockReturnValue({
+        getName: () => '2026-01-01 Test',
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({ getType: () => mockDocumentApp.ElementType.PARAGRAPH, asParagraph: () => paragraph }),
+        }),
+      });
+      mockCache.get.mockReturnValue(null);
+      mockCache.getAll.mockReturnValue({});
+      const html = '<html><head><meta property="og:title" content="Room Title"></head></html>';
+      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 200, getContentText: () => html });
+      mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 200, getContentText: () => html }]);
+
+      Code.debugOg();
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant bot+range:'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant iphone+range:'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant iphone:'));
+    });
+
     it('reports when there are no documents', () => {
       const iterator = { hasNext: () => false };
       mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
