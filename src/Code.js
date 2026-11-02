@@ -19,6 +19,24 @@ export const RSS_CACHE_LIMIT = 50;
 export const IMAGE_FOLDER_NAME = 'images';
 
 /**
+ * [Manual] Run from the editor when a permission error appears in the
+ * logs (e.g. a scope added to the manifest was never granted, which
+ * granular consent does not re-prompt for automatically). Logs the
+ * authorization URL to open in a browser, or reports that every
+ * scope is already authorized.
+ */
+export const authorize = () => {
+  const info = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+  const url = info.getAuthorizationUrl();
+  if (url) {
+    log_(`Authorization needed. Open this URL and grant all permissions: ${url}`);
+    return url;
+  }
+  log_('All scopes are already authorized.');
+  return '';
+};
+
+/**
  * [Batch Process] Run periodically to update properties
  */
 export const preCacheAll = () => {
