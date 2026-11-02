@@ -1238,6 +1238,63 @@ describe('Code.js', () => {
     });
   });
 
+  describe('debugOg', () => {
+    const URL_A = 'https://example.com/article-a';
+    const textChild = (text, attrs = {}) => ({
+      getType: () => mockDocumentApp.ElementType.TEXT,
+      asText: () => ({
+        getText: () => text,
+        getTextAttributeIndices: () => [0],
+        getAttributes: () => attrs,
+      }),
+    });
+    const linkPara = (children) => ({
+      getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+      getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+      getNumChildren: () => children.length,
+      getChild: (i) => children[i],
+    });
+    const setupDoc = () => {
+      const paragraph = linkPara([textChild(URL_A, { LINK_URL: URL_A })]);
+      const file = { getId: () => 'doc1', getName: () => '2026-01-01 Test' };
+      const iterator = { hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false), next: () => file };
+      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
+      mockDocumentApp.openById.mockReturnValue({
+        getName: () => '2026-01-01 Test',
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({ getType: () => mockDocumentApp.ElementType.PARAGRAPH, asParagraph: () => paragraph }),
+        }),
+      });
+    };
+
+    it('logs cache state, probe result and card count', () => {
+      setupDoc();
+      mockCache.get.mockReturnValue(null);
+      mockCache.getAll.mockReturnValue({});
+      const html = '<html><head><meta property="og:title" content="Probe Title"><meta property="og:image" content="https://example.com/og.jpg"></head></html>';
+      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 200, getContentText: () => html });
+      mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 200, getContentText: () => html }]);
+
+      Code.debugOg();
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug cache:'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('MISS'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('status=200'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('title=Probe Title'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('cards in markdown ='));
+    });
+
+    it('reports when there are no documents', () => {
+      const iterator = { hasNext: () => false };
+      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
+
+      Code.debugOg();
+
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('no documents'));
+    });
+  });
+
   describe('Link cards (OGP)', () => {
     const URL_A = 'https://example.com/article-a';
     const textChild = (text, attrs = {}) => ({
