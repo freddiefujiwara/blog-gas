@@ -101,13 +101,8 @@ global.DocumentApp = mockDocumentApp;
 global.PropertiesService = mockPropertiesService;
 global.Utilities = mockUtilities;
 global.MimeType = mockMimeType;
-const mockScriptApp = {
-  AuthMode: { FULL: 'FULL' },
-  getAuthorizationInfo: vi.fn(),
-};
 
 global.UrlFetchApp = mockUrlFetchApp;
-global.ScriptApp = mockScriptApp;
 global.console = {
   log: vi.fn(),
   error: vi.fn(),
@@ -1218,108 +1213,6 @@ describe('Code.js', () => {
     });
   });
 
-  describe('authorize', () => {
-    it('logs and returns the authorization URL when scopes are missing', () => {
-      mockScriptApp.getAuthorizationInfo.mockReturnValue({
-        getAuthorizationUrl: () => 'https://script.google.com/auth?example',
-      });
-      const url = Code.authorize();
-      expect(url).toBe('https://script.google.com/auth?example');
-      expect(mockScriptApp.getAuthorizationInfo).toHaveBeenCalledWith('FULL');
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Authorization needed'));
-    });
-
-    it('reports when every scope is already authorized', () => {
-      mockScriptApp.getAuthorizationInfo.mockReturnValue({
-        getAuthorizationUrl: () => '',
-      });
-      expect(Code.authorize()).toBe('');
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('already authorized'));
-    });
-  });
-
-  describe('debugOg', () => {
-    const URL_A = 'https://example.com/article-a';
-    const textChild = (text, attrs = {}) => ({
-      getType: () => mockDocumentApp.ElementType.TEXT,
-      asText: () => ({
-        getText: () => text,
-        getTextAttributeIndices: () => [0],
-        getAttributes: () => attrs,
-      }),
-    });
-    const linkPara = (children) => ({
-      getType: () => mockDocumentApp.ElementType.PARAGRAPH,
-      getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
-      getNumChildren: () => children.length,
-      getChild: (i) => children[i],
-    });
-    const setupDoc = () => {
-      const paragraph = linkPara([textChild(URL_A, { LINK_URL: URL_A })]);
-      const file = { getId: () => 'doc1', getName: () => '2026-01-01 Test' };
-      const iterator = { hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false), next: () => file };
-      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
-      mockDocumentApp.openById.mockReturnValue({
-        getName: () => '2026-01-01 Test',
-        getBody: () => ({
-          getNumChildren: () => 1,
-          getChild: () => ({ getType: () => mockDocumentApp.ElementType.PARAGRAPH, asParagraph: () => paragraph }),
-        }),
-      });
-    };
-
-    it('logs cache state, probe result and card count', () => {
-      setupDoc();
-      mockCache.get.mockReturnValue(null);
-      mockCache.getAll.mockReturnValue({});
-      const html = '<html><head><meta property="og:title" content="Probe Title"><meta property="og:image" content="https://example.com/og.jpg"></head></html>';
-      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 200, getContentText: () => html });
-      mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 200, getContentText: () => html }]);
-
-      Code.debugOg();
-
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug cache:'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('MISS'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('status=200'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('title=Probe Title'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('cards in markdown ='));
-    });
-
-    it('resolves a Rakuten ROOM target from the collects data in debugOg', () => {
-      const ROOM_URL = 'https://room.rakuten.co.jp/freddiefujiwara/1700000000000000';
-      const paragraph = linkPara([textChild(ROOM_URL, { LINK_URL: ROOM_URL })]);
-      const file = { getId: () => 'doc1', getName: () => '2026-01-01 Test' };
-      const iterator = { hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false), next: () => file };
-      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
-      mockDocumentApp.openById.mockReturnValue({
-        getName: () => '2026-01-01 Test',
-        getBody: () => ({
-          getNumChildren: () => 1,
-          getChild: () => ({ getType: () => mockDocumentApp.ElementType.PARAGRAPH, asParagraph: () => paragraph }),
-        }),
-      });
-      mockCache.get.mockReturnValue(null);
-      mockCache.getAll.mockReturnValue({});
-      const html = '<html><head><meta property="og:title" content="Room Title"></head></html>';
-      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 200, getContentText: () => html });
-      mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 200, getContentText: () => html }]);
-
-      Code.debugOg();
-
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug room:'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('MISS'));
-    });
-
-    it('reports when there are no documents', () => {
-      const iterator = { hasNext: () => false };
-      mockDriveApp.getFolderById.mockReturnValue({ getFilesByType: vi.fn().mockReturnValue(iterator) });
-
-      Code.debugOg();
-
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('no documents'));
-    });
-  });
-
   describe('Link cards (OGP)', () => {
     const URL_A = 'https://example.com/article-a';
     const textChild = (text, attrs = {}) => ({
@@ -1490,6 +1383,20 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockImplementation(() => { throw new Error('network down'); });
         mockUrlFetchApp.fetch.mockImplementation(() => { throw new Error('dns fail'); });
         expect(Code.resolveOgData_([URL_A])).toEqual({});
+      });
+
+      it('treats an unreadable response body as no data', () => {
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => { throw new Error('text content too long'); },
+        }]);
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toBeUndefined();
+        expect(mockCache.put).toHaveBeenCalledWith(
+          Code.ogCacheKey_(URL_A),
+          JSON.stringify({}),
+          Code.OG_FAILURE_CACHE_TTL,
+        );
       });
 
       it('falls back to per-URL fetch when fetchAll throws', () => {
@@ -1751,6 +1658,17 @@ describe('Code.js', () => {
         const result = Code.resolveRoomOgData_([ROOM_URL]);
         expect(result).toEqual({});
         expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+      });
+
+      it('resolveRoomOgData_ returns an empty map when the data server errors', () => {
+        setupDataServer();
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 500,
+          getContentText: () => 'server error',
+        });
+        const result = Code.resolveRoomOgData_([ROOM_URL]);
+        expect(result).toEqual({});
+        expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG room resolve failed'));
       });
 
       it('turns a ROOM link paragraph into a card from the collects data', () => {
