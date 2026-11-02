@@ -88,6 +88,10 @@ const mockMimeType = {
   GOOGLE_DOCS: 'GOOGLE_DOCS',
 };
 
+const mockUrlFetchApp = {
+  fetchAll: vi.fn(),
+};
+
 // Assign mocks to global
 global.CacheService = mockCacheService;
 global.ContentService = mockContentService;
@@ -96,6 +100,7 @@ global.DocumentApp = mockDocumentApp;
 global.PropertiesService = mockPropertiesService;
 global.Utilities = mockUtilities;
 global.MimeType = mockMimeType;
+global.UrlFetchApp = mockUrlFetchApp;
 global.console = {
   log: vi.fn(),
   error: vi.fn(),
@@ -1203,6 +1208,335 @@ describe('Code.js', () => {
       });
       Code.dailyRSSCache();
       expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('RSS Cache Error: Cache fail'));
+    });
+  });
+
+  describe('Link cards (OGP)', () => {
+    const URL_A = 'https://example.com/article-a';
+    const textChild = (text, attrs = {}) => ({
+      getType: () => mockDocumentApp.ElementType.TEXT,
+      asText: () => ({
+        getText: () => text,
+        getTextAttributeIndices: () => [0],
+        getAttributes: () => attrs,
+      }),
+    });
+    const linkPara = (children, heading = mockDocumentApp.ParagraphHeading.NORMAL) => ({
+      getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+      getHeading: () => heading,
+      getNumChildren: () => children.length,
+      getChild: (i) => children[i],
+    });
+    const ogHtml = ({ title = 'Example Title', image = 'https://example.com/og.jpg', description = 'Example description' } = {}) =>
+      `<html><head><meta property="og:title" content="${title}"><meta property="og:image" content="${image}"><meta property="og:description" content="${description}"></head><body></body></html>`;
+
+    describe('standaloneLinkUrl_', () => {
+      it('detects a paragraph that is only a linked URL', () => {
+        const p = linkPara([textChild(URL_A, { LINK_URL: URL_A })]);
+        expect(Code.standaloneLinkUrl_(p)).toBe(URL_A);
+      });
+
+      it('detects a bare URL without a link attribute', () => {
+        const p = linkPara([textChild(URL_A)]);
+        expect(Code.standaloneLinkUrl_(p)).toBe(URL_A);
+      });
+
+      it('rejects a sentence whose link text differs from the URL', () => {
+        const p = linkPara([textChild('click here', { LINK_URL: URL_A })]);
+        expect(Code.standaloneLinkUrl_(p)).toBeNull();
+      });
+
+      it('rejects mixed text where only part is linked', () => {
+        const p = {
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({
+              getText: () => `see ${URL_A} now`,
+              getTextAttributeIndices: () => [0, 4, 4 + URL_A.length, 4 + URL_A.length + 4],
+              getAttributes: (i) => (i === 4 ? { LINK_URL: URL_A } : {}),
+            }),
+          }),
+        };
+        expect(Code.standaloneLinkUrl_(p)).toBeNull();
+      });
+
+      it('rejects paragraphs with a non-text child', () => {
+        const p = linkPara([
+          textChild(URL_A, { LINK_URL: URL_A }),
+          { getType: () => mockDocumentApp.ElementType.INLINE_IMAGE },
+        ]);
+        expect(Code.standaloneLinkUrl_(p)).toBeNull();
+      });
+
+      it('rejects an empty paragraph', () => {
+        expect(Code.standaloneLinkUrl_(linkPara([]))).toBeNull();
+      });
+
+      it('rejects two different links', () => {
+        const p = {
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({
+              getText: () => `${URL_A}https://example.com/other`,
+              getTextAttributeIndices: () => [0, URL_A.length],
+              getAttributes: (i) => (i === 0 ? { LINK_URL: URL_A } : { LINK_URL: 'https://example.com/other' }),
+            }),
+          }),
+        };
+        expect(Code.standaloneLinkUrl_(p)).toBeNull();
+      });
+    });
+
+    describe('parseOgData_', () => {
+      it('parses standard og tags', () => {
+        expect(Code.parseOgData_(ogHtml(), URL_A)).toEqual({
+          title: 'Example Title',
+          image: 'https://example.com/og.jpg',
+          description: 'Example description',
+        });
+      });
+
+      it('parses tags with content before property', () => {
+        const html = '<head><meta content="Reversed" property="og:title"><meta content="/img.png" property="og:image"></head>';
+        const data = Code.parseOgData_(html, URL_A);
+        expect(data.title).toBe('Reversed');
+        expect(data.image).toBe('https://example.com/img.png');
+      });
+
+      it('falls back to twitter tags, <title> and meta description', () => {
+        const html = '<head><title>  Page   Title </title><meta name="description" content="Meta desc"><meta name="twitter:image" content="//cdn.example.com/t.jpg"></head>';
+        const data = Code.parseOgData_(html, URL_A);
+        expect(data.title).toBe('Page Title');
+        expect(data.image).toBe('https://cdn.example.com/t.jpg');
+        expect(data.description).toBe('Meta desc');
+      });
+
+      it('decodes HTML entities and truncates the description', () => {
+        const long = 'a'.repeat(200);
+        const html = `<head><meta property="og:title" content="Tom &amp; Jerry &#8212; &#x30C6;&#x30B9;&#x30C8;"><meta property="og:description" content="${long}"></head>`;
+        const data = Code.parseOgData_(html, URL_A);
+        expect(data.title).toBe('Tom & Jerry — テスト');
+        expect(data.description).toHaveLength(Code.OG_DESCRIPTION_LIMIT);
+      });
+
+      it('returns empty fields when nothing is found', () => {
+        expect(Code.parseOgData_('<head></head>', URL_A)).toEqual({ title: '', image: '', description: '' });
+        expect(Code.parseOgData_('', URL_A)).toEqual({ title: '', image: '', description: '' });
+      });
+    });
+
+    describe('resolveOgData_', () => {
+      beforeEach(() => {
+        mockCache.getAll.mockReturnValue({});
+        mockUrlFetchApp.fetchAll.mockReset();
+      });
+
+      it('returns an empty map for no URLs without touching cache or fetch', () => {
+        expect(Code.resolveOgData_([])).toEqual({});
+        expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+      });
+
+      it('uses cached data without fetching', () => {
+        const key = Code.ogCacheKey_(URL_A);
+        mockCache.getAll.mockReturnValue({ [key]: JSON.stringify({ title: 'Cached', image: '', description: '' }) });
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A].title).toBe('Cached');
+        expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+      });
+
+      it('fetches misses in parallel and caches them for 6 hours', () => {
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        }]);
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A].title).toBe('Example Title');
+        const requests = mockUrlFetchApp.fetchAll.mock.calls[0][0];
+        expect(requests).toHaveLength(1);
+        expect(requests[0].url).toBe(URL_A);
+        expect(mockCache.put).toHaveBeenCalledWith(
+          Code.ogCacheKey_(URL_A),
+          expect.stringContaining('Example Title'),
+          Code.OG_CACHE_TTL,
+        );
+      });
+
+      it('caches failures briefly and returns no data on HTTP errors', () => {
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 404,
+          getContentText: () => 'not found',
+        }]);
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toBeUndefined();
+        expect(mockCache.put).toHaveBeenCalledWith(
+          Code.ogCacheKey_(URL_A),
+          JSON.stringify({}),
+          Code.OG_FAILURE_CACHE_TTL,
+        );
+      });
+
+      it('survives fetchAll throwing', () => {
+        mockUrlFetchApp.fetchAll.mockImplementation(() => { throw new Error('network down'); });
+        expect(Code.resolveOgData_([URL_A])).toEqual({});
+      });
+    });
+
+    describe('linkCardMarkdown_', () => {
+      it('renders a full card', () => {
+        const html = Code.linkCardMarkdown_(URL_A, { title: 'T', image: 'https://example.com/i.jpg', description: 'D' });
+        expect(html).toContain('class="link-card"');
+        expect(html).toContain(`href="${URL_A}"`);
+        expect(html).toContain('<img class="link-card-image" src="https://example.com/i.jpg"');
+        expect(html).toContain('<span class="link-card-title">T</span>');
+        expect(html).toContain('<span class="link-card-description">D</span>');
+        expect(html).toContain('<span class="link-card-domain">example.com</span>');
+      });
+
+      it('omits the image and description when absent', () => {
+        const html = Code.linkCardMarkdown_(URL_A, { title: 'T', image: '', description: '' });
+        expect(html).not.toContain('<img');
+        expect(html).not.toContain('link-card-description');
+      });
+
+      it('returns null when there is nothing to show', () => {
+        expect(Code.linkCardMarkdown_(URL_A, {})).toBeNull();
+        expect(Code.linkCardMarkdown_(URL_A, null)).toBeNull();
+      });
+
+      it('escapes HTML in title and URL', () => {
+        const html = Code.linkCardMarkdown_('https://example.com/?a=1&b=2', { title: '<b>"x"</b>', image: '', description: '' });
+        expect(html).toContain('&lt;b&gt;&quot;x&quot;&lt;/b&gt;');
+        expect(html).toContain('a=1&amp;b=2');
+      });
+    });
+
+    describe('helpers', () => {
+      it('resolveUrl_ handles relative, root-relative and odd inputs', () => {
+        expect(Code.resolveUrl_('img/p.png', URL_A)).toBe('https://example.com/img/p.png');
+        expect(Code.resolveUrl_('', URL_A)).toBe('');
+        expect(Code.resolveUrl_('/abs.png', 'not-a-url')).toBe('/abs.png');
+        expect(Code.resolveUrl_('https://other.example.com/x.jpg', URL_A)).toBe('https://other.example.com/x.jpg');
+      });
+
+      it('decodeHtmlEntities_ leaves unknown or invalid entities untouched', () => {
+        expect(Code.decodeHtmlEntities_('&copy; &unknown; &#xZZ;')).toBe('&copy; &unknown; &#xZZ;');
+        expect(Code.decodeHtmlEntities_('&lt;a&gt; &quot;b&quot; &apos;c&apos;')).toBe('<a> "b" \'c\'');
+      });
+
+      it('parses single-quoted meta attributes', () => {
+        const html = "<head><meta property='og:title' content='Single'></head>";
+        expect(Code.parseOgData_(html, URL_A).title).toBe('Single');
+      });
+
+      it('detects a standalone link when attribute indices are null', () => {
+        const p = {
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({
+              getText: () => URL_A,
+              getTextAttributeIndices: () => null,
+              getAttributes: () => ({ LINK_URL: URL_A }),
+            }),
+          }),
+        };
+        expect(Code.standaloneLinkUrl_(p)).toBe(URL_A);
+      });
+
+      it('renders a card with an empty domain for scheme-less URLs', () => {
+        const html = Code.linkCardMarkdown_('example.com/page', { title: 'T', image: '', description: '' });
+        expect(html).toContain('<span class="link-card-domain"></span>');
+      });
+    });
+
+    describe('resolveOgData_ edge cases', () => {
+      beforeEach(() => {
+        mockCache.getAll.mockReturnValue({});
+        mockUrlFetchApp.fetchAll.mockReset();
+      });
+
+      it('refetches when the cached JSON is corrupt', () => {
+        mockCache.getAll.mockReturnValue({ [Code.ogCacheKey_(URL_A)]: '{broken' });
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        }]);
+        expect(Code.resolveOgData_([URL_A])[URL_A].title).toBe('Example Title');
+      });
+
+      it('still returns data when caching the result throws', () => {
+        mockCache.put.mockImplementation(() => { throw new Error('cache full'); });
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        }]);
+        expect(Code.resolveOgData_([URL_A])[URL_A].title).toBe('Example Title');
+      });
+
+      it('returns an empty map when the cache service itself throws', () => {
+        mockCacheService.getScriptCache.mockImplementationOnce(() => { throw new Error('no cache'); });
+        expect(Code.resolveOgData_([URL_A])).toEqual({});
+      });
+    });
+
+    describe('docBodyToMarkdown_ integration', () => {
+      const docWith = (paragraph) => ({
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => paragraph,
+          }),
+        }),
+      });
+
+      it('turns a standalone link paragraph into a card using cached OG data', () => {
+        mockCache.getAll.mockReturnValue({
+          [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached Title', image: 'https://example.com/og.jpg', description: 'Desc' }),
+        });
+        const markdown = Code.docBodyToMarkdown_(docWith(linkPara([textChild(URL_A, { LINK_URL: URL_A })])));
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).toContain('Cached Title');
+      });
+
+      it('keeps a plain link when no OG data is available', () => {
+        mockCache.getAll.mockReturnValue({});
+        mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 500, getContentText: () => '' }]);
+        const markdown = Code.docBodyToMarkdown_(docWith(linkPara([textChild(URL_A, { LINK_URL: URL_A })])));
+        expect(markdown).toContain(`[${URL_A}](${URL_A})`);
+        expect(markdown).not.toContain('link-card');
+      });
+
+      it('survives the OG pre-resolve failing and still converts', () => {
+        let calls = 0;
+        const paragraph = linkPara([textChild('plain text')]);
+        const doc = {
+          getBody: () => ({
+            getNumChildren: () => 1,
+            getChild: () => ({
+              getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+              asParagraph: () => {
+                calls += 1;
+                if (calls === 1) throw new Error('boom');
+                return paragraph;
+              },
+            }),
+          }),
+        };
+        expect(Code.docBodyToMarkdown_(doc)).toContain('plain text');
+      });
+
+      it('does not card-ify links inside headings', () => {
+        mockCache.getAll.mockReturnValue({
+          [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached Title', image: '', description: '' }),
+        });
+        const p = linkPara([textChild(URL_A, { LINK_URL: URL_A })], mockDocumentApp.ParagraphHeading.HEADING2);
+        const markdown = Code.docBodyToMarkdown_(docWith(p));
+        expect(markdown).toContain('## ');
+        expect(markdown).not.toContain('link-card');
+      });
     });
   });
 });
