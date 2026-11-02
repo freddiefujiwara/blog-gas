@@ -90,6 +90,7 @@ const mockMimeType = {
 
 const mockUrlFetchApp = {
   fetchAll: vi.fn(),
+  fetch: vi.fn(),
 };
 
 // Assign mocks to global
@@ -1379,7 +1380,37 @@ describe('Code.js', () => {
 
       it('survives fetchAll throwing', () => {
         mockUrlFetchApp.fetchAll.mockImplementation(() => { throw new Error('network down'); });
+        mockUrlFetchApp.fetch.mockImplementation(() => { throw new Error('dns fail'); });
         expect(Code.resolveOgData_([URL_A])).toEqual({});
+      });
+
+      it('falls back to per-URL fetch when fetchAll throws', () => {
+        mockUrlFetchApp.fetchAll.mockImplementation(() => { throw new Error('batch aborted'); });
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        });
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A].title).toBe('Example Title');
+        expect(mockUrlFetchApp.fetch).toHaveBeenCalledWith(URL_A, expect.objectContaining({ url: URL_A }));
+      });
+
+      it('logs the HTTP status when a fetch does not succeed', () => {
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 403,
+          getContentText: () => 'forbidden',
+        }]);
+        expect(Code.resolveOgData_([URL_A])).toEqual({});
+        expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG fetch status 403'));
+      });
+
+      it('logs when a fetched page has no usable OG data', () => {
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => '<html><head></head><body>plain</body></html>',
+        }]);
+        expect(Code.resolveOgData_([URL_A])).toEqual({});
+        expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG no data'));
       });
     });
 

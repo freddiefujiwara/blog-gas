@@ -421,7 +421,17 @@ export const resolveOgData_ = (urls) => {
     try {
       responses = UrlFetchApp.fetchAll(requests) || [];
     } catch (e) {
-      responses = [];
+      // One unreachable URL can make the whole batch throw. Fall back to
+      // per-URL fetches so the other links still get their cards.
+      log_(`OG fetchAll failed: ${e.message}`);
+      responses = requests.map((req) => {
+        try {
+          return UrlFetchApp.fetch(req.url, req);
+        } catch (fetchError) {
+          log_(`OG fetch failed: ${req.url} (${fetchError.message})`);
+          return null;
+        }
+      });
     }
     misses.forEach((url, i) => {
       let data = null;
@@ -429,6 +439,9 @@ export const resolveOgData_ = (urls) => {
         const res = responses[i];
         if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
           data = parseOgData_(res.getContentText(), url);
+          if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
+        } else if (res) {
+          log_(`OG fetch status ${res.getResponseCode()}: ${url}`);
         }
       } catch (e) {
         data = null;
@@ -474,6 +487,7 @@ export const docBodyToMarkdown_ = (doc) => {
         if (url && !urls.includes(url)) urls.push(url);
       }
     });
+    if (urls.length) log_(`OG targets: ${urls.length} (${urls.join(', ')})`);
     ogDataByUrl_ = resolveOgData_(urls);
   } catch (e) {
     log_(`OG pre-resolve failed: ${e.message}`);
