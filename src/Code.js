@@ -85,6 +85,29 @@ export const debugOg = () => {
       log_(`OG debug probe: ${url} failed: ${e.message}`);
     }
   });
+  // Rakuten ROOM answers 403 to the production request shape. Probe
+  // header variants against the first ROOM target to learn whether the
+  // block is the User-Agent, the Range header, or the egress IP.
+  const roomUrl = urls.find((u) => u.includes('room.rakuten.co.jp'));
+  if (roomUrl) {
+    const iphoneUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+    const variants = [
+      ['bot+range', { Range: 'bytes=0-65535', 'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)' }],
+      ['iphone+range', { Range: 'bytes=0-65535', 'User-Agent': iphoneUa }],
+      ['iphone', { 'User-Agent': iphoneUa }],
+    ];
+    variants.forEach(([name, headers]) => {
+      try {
+        const res = UrlFetchApp.fetch(roomUrl, { headers, muteHttpExceptions: true, followRedirects: true });
+        let text = '';
+        try { text = res.getContentText() || ''; } catch (e) { /* keep empty */ }
+        const parsed = text ? parseOgData_(text, roomUrl) : null;
+        log_(`OG debug variant ${name}: status=${res.getResponseCode()} bytes=${text.length} title=${parsed ? parsed.title : ''} image=${parsed ? parsed.image : ''}`);
+      } catch (e) {
+        log_(`OG debug variant ${name}: failed: ${e.message}`);
+      }
+    });
+  }
   const markdown = docBodyToMarkdown_(doc);
   log_(`OG debug: cards in markdown = ${(markdown.match(/link-card/g) || []).length}`);
 };
