@@ -40,8 +40,9 @@ export const authorize = () => {
  * [Manual] Diagnose link cards on the newest document. Logs, for each
  * standalone link: the raw OG cache entry, a direct fetch probe that
  * bypasses the cache (status code and the parsed OG title/image), and
- * how many cards a fresh conversion emits. Read the result in the
- * execution log or in the DEBUG_LOGS script property.
+ * how many cards a fresh conversion emits. ROOM links are resolved
+ * from the collects data instead of a fetch probe. Read the result in
+ * the execution log or in the DEBUG_LOGS script property.
  */
 export const debugOg = () => {
   const ids = listDocIdsSortedByTitle_(getConfig_().folderId);
@@ -60,8 +61,14 @@ export const debugOg = () => {
     }
   }
   log_(`OG debug: doc=${doc.getName()} targets=${urls.length}`);
+  const roomData = resolveRoomOgData_(urls);
   const cache = CacheService.getScriptCache();
   urls.forEach((url) => {
+    if (roomPostId_(url)) {
+      const og = roomData[url];
+      log_(`OG debug room: ${url} -> ${og ? `title=${og.title} image=${og.image}` : 'MISS'}`);
+      return;
+    }
     const raw = cache.get(ogCacheKey_(url));
     log_(`OG debug cache: ${url} -> ${raw ? String(raw).slice(0, 200) : 'MISS'}`);
     try {
@@ -85,29 +92,6 @@ export const debugOg = () => {
       log_(`OG debug probe: ${url} failed: ${e.message}`);
     }
   });
-  // Rakuten ROOM answers 403 to the production request shape. Probe
-  // header variants against the first ROOM target to learn whether the
-  // block is the User-Agent, the Range header, or the egress IP.
-  const roomUrl = urls.find((u) => u.includes('room.rakuten.co.jp'));
-  if (roomUrl) {
-    const iphoneUa = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
-    const variants = [
-      ['bot+range', { Range: 'bytes=0-65535', 'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)' }],
-      ['iphone+range', { Range: 'bytes=0-65535', 'User-Agent': iphoneUa }],
-      ['iphone', { 'User-Agent': iphoneUa }],
-    ];
-    variants.forEach(([name, headers]) => {
-      try {
-        const res = UrlFetchApp.fetch(roomUrl, { headers, muteHttpExceptions: true, followRedirects: true });
-        let text = '';
-        try { text = res.getContentText() || ''; } catch (e) { /* keep empty */ }
-        const parsed = text ? parseOgData_(text, roomUrl) : null;
-        log_(`OG debug variant ${name}: status=${res.getResponseCode()} bytes=${text.length} title=${parsed ? parsed.title : ''} image=${parsed ? parsed.image : ''}`);
-      } catch (e) {
-        log_(`OG debug variant ${name}: failed: ${e.message}`);
-      }
-    });
-  }
   const markdown = docBodyToMarkdown_(doc);
   log_(`OG debug: cards in markdown = ${(markdown.match(/link-card/g) || []).length}`);
 };
@@ -556,6 +540,85 @@ export const resolveOgData_ = (urls) => {
   }
 };
 
+/** -----------------------------
+ *  Rakuten ROOM cards: room.rakuten.co.jp rejects UrlFetch from GAS
+ *  (403, blocked by egress IP — verified 2026-11-03), so ROOM post
+ *  cards are built from the collects data that the ROOM sync already
+ *  publishes (the same source the "List of stuff" sheet is built
+ *  from). The data server base URL lives in the ROOM_DATA_BASE_URL
+ *  script property, never in source. The collects data refreshes
+ *  daily, so a brand-new post can take a day to become cardable.
+ *  ----------------------------- */
+export const ROOM_MAP_CACHE_KEY = 'og:roommap:v1';
+
+export const roomPostId_ = (url) => {
+  const m = String(url || '').match(/^https:\/\/room\.rakuten\.co\.jp\/[^/]+\/(\d+)\/?(?:[?#].*)?$/);
+  return m ? m[1] : null;
+};
+
+export const roomOgFromCollect_ = (collect) => {
+  if (!collect) return null;
+  const item = collect.item || {};
+  const title = collect.name || item.name || '';
+  const image = (item.picture && item.picture.url) || (collect.image_top && collect.image_top.url) || '';
+  const description = String(collect.content || '').slice(0, OG_DESCRIPTION_LIMIT);
+  if (!title && !image) return null;
+  return { title, image, description };
+};
+
+export const fetchRoomOgMap_ = (baseUrl) => {
+  const base = String(baseUrl || '').replace(/\/+$/, '');
+  const collectionsRes = UrlFetchApp.fetch(`${base}/collections.json`, { muteHttpExceptions: true });
+  if (collectionsRes.getResponseCode() !== 200) {
+    throw new Error(`collections.json status ${collectionsRes.getResponseCode()}`);
+  }
+  const collections = (JSON.parse(collectionsRes.getContentText()) || {}).data || [];
+  const requests = collections.map((c) => ({ url: `${base}/collects_${c.id}.json`, muteHttpExceptions: true }));
+  const responses = requests.length ? (UrlFetchApp.fetchAll(requests) || []) : [];
+  const map = {};
+  responses.forEach((res) => {
+    if (!res || res.getResponseCode() !== 200) return;
+    const collects = (JSON.parse(res.getContentText()) || {}).data || [];
+    collects.forEach((collect) => {
+      const og = roomOgFromCollect_(collect);
+      if (og && collect.id) map[String(collect.id)] = og;
+    });
+  });
+  return map;
+};
+
+export const getRoomOgMap_ = () => {
+  const base = PropertiesService.getScriptProperties().getProperty('ROOM_DATA_BASE_URL');
+  if (!base) return null;
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(ROOM_MAP_CACHE_KEY);
+  if (raw) {
+    try { return JSON.parse(raw); } catch (e) { /* refetch below */ }
+  }
+  const map = fetchRoomOgMap_(base);
+  try { cache.put(ROOM_MAP_CACHE_KEY, JSON.stringify(map), OG_CACHE_TTL); } catch (e) { /* best-effort */ }
+  return map;
+};
+
+export const resolveRoomOgData_ = (urls) => {
+  const result = {};
+  try {
+    const targets = (urls || []).filter((u) => roomPostId_(u));
+    if (!targets.length) return result;
+    const map = getRoomOgMap_();
+    if (!map) return result;
+    targets.forEach((url) => {
+      const og = map[roomPostId_(url)];
+      if (og) result[url] = og;
+    });
+    log_(`OG room targets: ${targets.length} (resolved: ${Object.keys(result).length})`);
+    return result;
+  } catch (e) {
+    log_(`OG room resolve failed: ${e.message}`);
+    return result;
+  }
+};
+
 export const linkCardMarkdown_ = (url, og) => {
   if (!og || (!og.title && !og.image)) return null;
   const title = og.title || url;
@@ -582,7 +645,9 @@ export const docBodyToMarkdown_ = (doc) => {
       }
     });
     if (urls.length) log_(`OG targets: ${urls.length} (${urls.join(', ')})`);
-    ogDataByUrl_ = resolveOgData_(urls);
+    const roomUrls = urls.filter((u) => roomPostId_(u));
+    const otherUrls = urls.filter((u) => !roomPostId_(u));
+    ogDataByUrl_ = { ...resolveOgData_(otherUrls), ...resolveRoomOgData_(roomUrls) };
   } catch (e) {
     log_(`OG pre-resolve failed: ${e.message}`);
     ogDataByUrl_ = {};
