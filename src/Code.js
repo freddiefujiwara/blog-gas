@@ -282,11 +282,205 @@ export const inlineImageToMarkdown_ = (image) => {
 };
 
 /** -----------------------------
+ *  Link cards: a paragraph that is only a link becomes an OGP card.
+ *  OG data is referenced by URL (never copied to Drive), cached for
+ *  6 hours, and fetched in parallel. Any failure falls back to a
+ *  plain link, so card conversion can never break an article.
+ *  ----------------------------- */
+export const OG_CACHE_TTL = 21600; // 6 hours: the CacheService maximum
+export const OG_FAILURE_CACHE_TTL = 600;
+export const OG_DESCRIPTION_LIMIT = 140;
+export const OG_SCAN_LIMIT = 200000;
+
+// OG data for the document currently being converted (per execution).
+let ogDataByUrl_ = {};
+
+export const ogCacheKey_ = (url) => {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
+    .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+  return `og:${digest}`;
+};
+
+export const standaloneLinkUrl_ = (p) => {
+  let text = '';
+  let linkUrl = null;
+  let hasUnlinkedText = false;
+  for (let i = 0; i < p.getNumChildren(); i++) {
+    const child = p.getChild(i);
+    if (child.getType() !== DocumentApp.ElementType.TEXT) return null;
+    const textEl = child.asText();
+    const fullText = textEl.getText() || '';
+    if (!fullText) continue;
+    text += fullText;
+    const indices = textEl.getTextAttributeIndices() || [];
+    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
+    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
+    for (let k = 0; k < indices.length - 1; k++) {
+      const start = indices[k];
+      const end = indices[k + 1];
+      if (start >= end) continue;
+      const chunk = fullText.substring(start, end);
+      if (!chunk.trim()) continue;
+      const link = (textEl.getAttributes(start) || {})[DocumentApp.Attribute.LINK_URL];
+      if (!link) {
+        hasUnlinkedText = true;
+      } else if (linkUrl && linkUrl !== link) {
+        return null;
+      } else {
+        linkUrl = link;
+      }
+    }
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  if (!hasUnlinkedText && linkUrl && trimmed === linkUrl && /^https?:\/\//.test(linkUrl)) return linkUrl;
+  if (!linkUrl && /^https?:\/\/\S+$/.test(trimmed)) return trimmed;
+  return null;
+};
+
+export const decodeHtmlEntities_ = (s) => String(s || '').replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (whole, body) => {
+  if (body[0] === '#') {
+    const code = (body[1] === 'x' || body[1] === 'X')
+      ? parseInt(body.slice(2), 16)
+      : parseInt(body.slice(1), 10);
+    return Number.isNaN(code) ? whole : String.fromCodePoint(code);
+  }
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return Object.prototype.hasOwnProperty.call(named, body) ? named[body] : whole;
+});
+
+const metaContent_ = (tag, attrName) => {
+  const re = new RegExp(`${attrName}\\s*=\\s*"([^"]*)"|${attrName}\\s*=\\s*'([^']*)'`, 'i');
+  const m = String(tag).match(re);
+  if (!m) return null;
+  return m[1] !== undefined ? m[1] : m[2];
+};
+
+export const resolveUrl_ = (maybeRelative, pageUrl) => {
+  const url = String(maybeRelative || '').trim();
+  if (!url) return '';
+  if (/^https?:\/\//i.test(url)) return url;
+  const originMatch = String(pageUrl).match(/^(https?:\/\/[^/]+)/i);
+  if (!originMatch) return url;
+  if (url.startsWith('//')) return `${originMatch[1].split(':')[0]}:${url}`;
+  if (url.startsWith('/')) return `${originMatch[1]}${url}`;
+  return `${originMatch[1]}/${url}`;
+};
+
+export const parseOgData_ = (html, pageUrl) => {
+  const head = String(html || '').slice(0, OG_SCAN_LIMIT).split(/<\/head>/i)[0];
+  const metas = {};
+  const tagRe = /<meta\s+[^>]*>/gi;
+  let tagMatch;
+  while ((tagMatch = tagRe.exec(head)) !== null) {
+    const tag = tagMatch[0];
+    const key = (metaContent_(tag, 'property') || metaContent_(tag, 'name') || '').toLowerCase();
+    const content = metaContent_(tag, 'content');
+    if (key && content && !(key in metas)) metas[key] = decodeHtmlEntities_(content);
+  }
+  let title = metas['og:title'] || metas['twitter:title'] || '';
+  if (!title) {
+    const titleMatch = head.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    if (titleMatch) title = decodeHtmlEntities_(titleMatch[1].replace(/\s+/g, ' ').trim());
+  }
+  const image = resolveUrl_(metas['og:image'] || metas['twitter:image'] || '', pageUrl);
+  const description = (metas['og:description'] || metas.description || '').slice(0, OG_DESCRIPTION_LIMIT);
+  return { title, image, description };
+};
+
+export const resolveOgData_ = (urls) => {
+  const result = {};
+  try {
+    if (!urls.length) return result;
+    const cache = CacheService.getScriptCache();
+    const keys = urls.map(ogCacheKey_);
+    const cached = cache.getAll(keys) || {};
+    const misses = [];
+    urls.forEach((url, idx) => {
+      const raw = cached[keys[idx]];
+      if (raw) {
+        try {
+          result[url] = JSON.parse(raw);
+          return;
+        } catch (e) { /* fall through and refetch */ }
+      }
+      misses.push(url);
+    });
+    if (!misses.length) return result;
+
+    const requests = misses.map((url) => ({
+      url,
+      headers: {
+        Range: 'bytes=0-65535',
+        'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
+      },
+      muteHttpExceptions: true,
+      followRedirects: true,
+    }));
+    let responses = [];
+    try {
+      responses = UrlFetchApp.fetchAll(requests) || [];
+    } catch (e) {
+      responses = [];
+    }
+    misses.forEach((url, i) => {
+      let data = null;
+      try {
+        const res = responses[i];
+        if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
+          data = parseOgData_(res.getContentText(), url);
+        }
+      } catch (e) {
+        data = null;
+      }
+      if (data && (data.title || data.image)) {
+        result[url] = data;
+        try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
+      } else {
+        // No usable OG data (or the fetch failed): remember briefly so
+        // repeated conversions do not refetch right away.
+        try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
+      }
+    });
+    return result;
+  } catch (e) {
+    log_(`OG resolve failed: ${e.message}`);
+    return result;
+  }
+};
+
+export const linkCardMarkdown_ = (url, og) => {
+  if (!og || (!og.title && !og.image)) return null;
+  const title = og.title || url;
+  const img = og.image ? `<img class="link-card-image" src="${escapeXml_(og.image)}" alt="">` : '';
+  const desc = og.description ? `<span class="link-card-description">${escapeXml_(og.description)}</span>` : '';
+  const domainMatch = String(url).match(/^https?:\/\/([^/]+)/);
+  const domain = domainMatch ? domainMatch[1] : '';
+  return `<a class="link-card" href="${escapeXml_(url)}" target="_blank" rel="noopener noreferrer">${img}<span class="link-card-body"><span class="link-card-title">${escapeXml_(title)}</span>${desc}<span class="link-card-domain">${escapeXml_(domain)}</span></span></a>\n`;
+};
+
+/** -----------------------------
  *  Markdown conversion (best-effort)
  *  ----------------------------- */
 export const docBodyToMarkdown_ = (doc) => {
   const body = doc.getBody();
-  const out = Array.from({ length: body.getNumChildren() }, (_, i) => elementToMarkdown_(body.getChild(i)));
+  const children = Array.from({ length: body.getNumChildren() }, (_, i) => body.getChild(i));
+  ogDataByUrl_ = {};
+  try {
+    const urls = [];
+    children.forEach((el) => {
+      if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
+        const url = standaloneLinkUrl_(el.asParagraph());
+        if (url && !urls.includes(url)) urls.push(url);
+      }
+    });
+    ogDataByUrl_ = resolveOgData_(urls);
+  } catch (e) {
+    log_(`OG pre-resolve failed: ${e.message}`);
+    ogDataByUrl_ = {};
+  }
+  const out = children.map((el) => elementToMarkdown_(el));
+  ogDataByUrl_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
 
@@ -313,7 +507,13 @@ export const paragraphToMarkdown_ = (p) => {
   const text = paragraphTextWithInlineStyles_(p).trim();
   if (!text) return '';
   const prefix = headingToPrefix_(p.getHeading());
-  return prefix ? `${prefix} ${text}\n` : `${text}\n`;
+  if (prefix) return `${prefix} ${text}\n`;
+  const linkUrl = standaloneLinkUrl_(p);
+  if (linkUrl && ogDataByUrl_[linkUrl]) {
+    const card = linkCardMarkdown_(linkUrl, ogDataByUrl_[linkUrl]);
+    if (card) return card;
+  }
+  return `${text}\n`;
 };
 
 export const listItemToMarkdown_ = (li) => {
