@@ -1285,7 +1285,7 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('cards in markdown ='));
     });
 
-    it('probes header variants for a Rakuten ROOM target', () => {
+    it('resolves a Rakuten ROOM target from the collects data in debugOg', () => {
       const ROOM_URL = 'https://room.rakuten.co.jp/freddiefujiwara/1700000000000000';
       const paragraph = linkPara([textChild(ROOM_URL, { LINK_URL: ROOM_URL })]);
       const file = { getId: () => 'doc1', getName: () => '2026-01-01 Test' };
@@ -1306,9 +1306,8 @@ describe('Code.js', () => {
 
       Code.debugOg();
 
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant bot+range:'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant iphone+range:'));
-      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug variant iphone:'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG debug room:'));
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('MISS'));
     });
 
     it('reports when there are no documents', () => {
@@ -1676,6 +1675,92 @@ describe('Code.js', () => {
         const markdown = Code.docBodyToMarkdown_(docWith(p));
         expect(markdown).toContain('## ');
         expect(markdown).not.toContain('link-card');
+      });
+    });
+
+    describe('ROOM collects cards', () => {
+      const ROOM_URL = 'https://room.rakuten.co.jp/freddiefujiwara/1700000000000001';
+      const collect = {
+        id: '1700000000000001',
+        name: 'Room Item',
+        content: 'My comment',
+        item: { name: 'Room Item', picture: { url: 'https://example.com/p.jpg' }, url: 'https://item.rakuten.co.jp/shop/x/' },
+      };
+      const docWith = (paragraph) => ({
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => paragraph,
+          }),
+        }),
+      });
+      const setupDataServer = () => {
+        mockProperties.getProperty.mockImplementation((key) => (key === 'ROOM_DATA_BASE_URL' ? 'https://data.example.com' : (TEST_CONFIG[key] ?? null)));
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ data: [{ id: 1, name: 'c1' }] }),
+        });
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ data: [collect] }),
+        }]);
+        mockCache.get.mockReturnValue(null);
+      };
+
+      it('roomPostId_ extracts the post id', () => {
+        expect(Code.roomPostId_(ROOM_URL)).toBe('1700000000000001');
+        expect(Code.roomPostId_(`${ROOM_URL}/`)).toBe('1700000000000001');
+        expect(Code.roomPostId_('https://example.com/article-a')).toBeNull();
+        expect(Code.roomPostId_('https://item.rakuten.co.jp/shop/x/')).toBeNull();
+      });
+
+      it('roomOgFromCollect_ maps a collect to OG data', () => {
+        expect(Code.roomOgFromCollect_(collect)).toEqual({
+          title: 'Room Item',
+          image: 'https://example.com/p.jpg',
+          description: 'My comment',
+        });
+        expect(Code.roomOgFromCollect_({ id: '2', name: '', content: '', item: {} })).toBeNull();
+        const noPicture = { id: '3', name: 'T', content: '', image_top: { url: 'https://example.com/top.jpg' }, item: {} };
+        expect(Code.roomOgFromCollect_(noPicture).image).toBe('https://example.com/top.jpg');
+      });
+
+      it('resolveRoomOgData_ resolves post urls from the collects data', () => {
+        setupDataServer();
+        const result = Code.resolveRoomOgData_([ROOM_URL]);
+        expect(result[ROOM_URL]).toEqual({
+          title: 'Room Item',
+          image: 'https://example.com/p.jpg',
+          description: 'My comment',
+        });
+        expect(mockUrlFetchApp.fetch).toHaveBeenCalledWith('https://data.example.com/collections.json', expect.anything());
+        const requests = mockUrlFetchApp.fetchAll.mock.calls[0][0];
+        expect(requests[0].url).toBe('https://data.example.com/collects_1.json');
+      });
+
+      it('resolveRoomOgData_ uses the cached map on the second call', () => {
+        setupDataServer();
+        mockCache.get.mockReturnValue(JSON.stringify({ '1700000000000001': { title: 'Cached', image: '', description: '' } }));
+        const result = Code.resolveRoomOgData_([ROOM_URL]);
+        expect(result[ROOM_URL].title).toBe('Cached');
+        expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+      });
+
+      it('resolveRoomOgData_ is off when the base URL property is unset', () => {
+        const result = Code.resolveRoomOgData_([ROOM_URL]);
+        expect(result).toEqual({});
+        expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+      });
+
+      it('turns a ROOM link paragraph into a card from the collects data', () => {
+        setupDataServer();
+        const markdown = Code.docBodyToMarkdown_(docWith(linkPara([textChild(ROOM_URL, { LINK_URL: ROOM_URL })])));
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).toContain('Room Item');
+        expect(markdown).toContain('https://example.com/p.jpg');
+        const fetchedUrls = mockUrlFetchApp.fetchAll.mock.calls.flatMap((c) => (Array.isArray(c[0]) ? c[0].map((r) => r.url) : []));
+        expect(fetchedUrls).not.toContain(ROOM_URL);
       });
     });
   });
