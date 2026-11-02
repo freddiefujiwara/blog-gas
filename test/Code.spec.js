@@ -101,7 +101,13 @@ global.DocumentApp = mockDocumentApp;
 global.PropertiesService = mockPropertiesService;
 global.Utilities = mockUtilities;
 global.MimeType = mockMimeType;
+const mockScriptApp = {
+  AuthMode: { FULL: 'FULL' },
+  getAuthorizationInfo: vi.fn(),
+};
+
 global.UrlFetchApp = mockUrlFetchApp;
+global.ScriptApp = mockScriptApp;
 global.console = {
   log: vi.fn(),
   error: vi.fn(),
@@ -1209,6 +1215,26 @@ describe('Code.js', () => {
       });
       Code.dailyRSSCache();
       expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('RSS Cache Error: Cache fail'));
+    });
+  });
+
+  describe('authorize', () => {
+    it('logs and returns the authorization URL when scopes are missing', () => {
+      mockScriptApp.getAuthorizationInfo.mockReturnValue({
+        getAuthorizationUrl: () => 'https://script.google.com/auth?example',
+      });
+      const url = Code.authorize();
+      expect(url).toBe('https://script.google.com/auth?example');
+      expect(mockScriptApp.getAuthorizationInfo).toHaveBeenCalledWith('FULL');
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('Authorization needed'));
+    });
+
+    it('reports when every scope is already authorized', () => {
+      mockScriptApp.getAuthorizationInfo.mockReturnValue({
+        getAuthorizationUrl: () => '',
+      });
+      expect(Code.authorize()).toBe('');
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('already authorized'));
     });
   });
 
