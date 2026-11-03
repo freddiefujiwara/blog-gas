@@ -858,6 +858,57 @@ describe('Code.js', () => {
         expect(result).toBe('**bold*** italic*[ link](http://example.com)');
       });
 
+      it('should merge adjacent bold segments split by other attributes', () => {
+        // Attribute indices split wherever ANY attribute changes
+        // (here: font/color on the second half), even when bold
+        // continues. The two halves must stay in one ** pair,
+        // otherwise the output is **a****b** and parsers leak
+        // literal asterisks.
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => '招待コード：ZLBVMZ',
+            getTextAttributeIndices: () => [0, 6, 12],
+            getAttributes: (i) => {
+              if (i < 6) return { [mockDocumentApp.Attribute.BOLD]: true };
+              return {
+                [mockDocumentApp.Attribute.BOLD]: true,
+                [mockDocumentApp.Attribute.FOREGROUND_COLOR]: '#ff0000',
+              };
+            },
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('**招待コード：ZLBVMZ**');
+      });
+
+      it('should merge adjacent segments that share the same link', () => {
+        const mockText = {
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => 'click here',
+            getTextAttributeIndices: () => [0, 5, 10],
+            getAttributes: (i) => {
+              if (i < 5) return { [mockDocumentApp.Attribute.LINK_URL]: 'http://example.com' };
+              return {
+                [mockDocumentApp.Attribute.LINK_URL]: 'http://example.com',
+                [mockDocumentApp.Attribute.BOLD]: true,
+              };
+            },
+          }),
+        };
+        const mockP = {
+          getNumChildren: () => 1,
+          getChild: () => mockText,
+        };
+
+        expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('[click here](http://example.com)');
+      });
+
       it('should handle combined bold and italic', () => {
         const mockText = {
           getType: () => mockDocumentApp.ElementType.TEXT,
