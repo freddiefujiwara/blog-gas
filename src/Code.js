@@ -663,9 +663,34 @@ export const paragraphTextWithInlineStyles_ = (p) => {
   const { BOLD, ITALIC, LINK_URL } = DocumentApp.Attribute;
   const out = [];
 
+  // Adjacent segments that share the same inline style must stay
+  // inside a single pair of markers. Attribute indices also split
+  // on attributes this converter ignores (font, color, ...), so
+  // wrapping every segment on its own emits e.g. **a****b**, which
+  // Markdown parsers render with literal asterisks left over.
+  let openKey = '';
+  let openLink = null;
+  const closeInline = () => {
+    if (openKey === 'link') out.push(`](${openLink})`);
+    else if (openKey === 'bi') out.push('***');
+    else if (openKey === 'b') out.push('**');
+    else if (openKey === 'i') out.push('*');
+    openKey = '';
+    openLink = null;
+  };
+  const openInline = (key, link) => {
+    if (key === 'link') out.push('[');
+    else if (key === 'bi') out.push('***');
+    else if (key === 'b') out.push('**');
+    else if (key === 'i') out.push('*');
+    openKey = key;
+    openLink = link || null;
+  };
+
   for (let i = 0; i < p.getNumChildren(); i++) {
     const child = p.getChild(i);
     if (child.getType() === DocumentApp.ElementType.INLINE_IMAGE) {
+      closeInline();
       out.push(inlineImageToMarkdown_(child.asInlineImage()));
       continue;
     }
@@ -684,28 +709,25 @@ export const paragraphTextWithInlineStyles_ = (p) => {
       const end = indices[k + 1];
       if (start >= end) continue;
 
-      let chunk = fullText.substring(start, end);
+      const chunk = fullText.substring(start, end);
       if (!chunk) continue;
+      const text = escapeMdInline_(chunk.replace(/\r/g, ''));
+      if (!text) continue;
 
       const attrs = textEl.getAttributes(start);
       const link = attrs[LINK_URL];
       const bold = !!attrs[BOLD];
       const italic = !!attrs[ITALIC];
 
-      chunk = escapeMdInline_(chunk.replace(/\r/g, ''));
-
-      if (link) {
-        chunk = `[${chunk}](${link})`;
-      } else if (bold && italic) {
-        chunk = `***${chunk}***`;
-      } else if (bold) {
-        chunk = `**${chunk}**`;
-      } else if (italic) {
-        chunk = `*${chunk}*`;
+      const key = link ? 'link' : bold && italic ? 'bi' : bold ? 'b' : italic ? 'i' : '';
+      if (key !== openKey || (key === 'link' && link !== openLink)) {
+        closeInline();
+        if (key) openInline(key, link);
       }
-      out.push(chunk);
+      out.push(text);
     }
   }
+  closeInline();
   return out.join('');
 };
 
