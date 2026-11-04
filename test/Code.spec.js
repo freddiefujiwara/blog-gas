@@ -357,6 +357,53 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
     });
 
+    it('should return only ids and titles for o=titles from cache, without article bodies', () => {
+      const allIds = ['id0', 'id1'];
+      const allTitles = { id0: 'Title 0', id1: 'Title 1' };
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        if (key === 'titles') return JSON.stringify(allTitles);
+        return null;
+      });
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'titles' } });
+
+      expect(mockCache.getAll).not.toHaveBeenCalled();
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: allIds,
+        titles: allTitles,
+      }));
+    });
+
+    it('should build ids and titles from file names on a cache miss for o=titles, without opening docs', () => {
+      mockCache.get.mockReturnValue(null);
+      const mockFiles = [
+        { getId: () => 'id1', getName: () => '2026-01-02 B' },
+        { getId: () => 'id2', getName: () => '2026-01-01 A' },
+      ];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      });
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'titles' } });
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: ['id1', 'id2'],
+        titles: { id1: '2026-01-02 B', id2: '2026-01-01 A' },
+      }));
+    });
+
     it('should return RSS XML when o=rss is specified', () => {
       const chunkData = [{ id: 'id1', title: 'Title & More', url: 'http://url', content: 'Content <md>' }];
       mockProperties.getProperty.mockImplementation((key) => {
