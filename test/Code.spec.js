@@ -158,8 +158,13 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
-      // 1 for the list, and up to PRE_CACHE_LIMIT for the documents
-      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 1);
+      // 1 for the list, 1 for the titles, and up to PRE_CACHE_LIMIT for the documents
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 2);
+      const titlesCall = mockCache.put.mock.calls.find((c) => c[0] === 'titles');
+      expect(titlesCall).toBeDefined();
+      const savedTitles = JSON.parse(titlesCall[1]);
+      expect(Object.keys(savedTitles)).toHaveLength(Code.PRE_CACHE_LIMIT + 5);
+      expect(savedTitles.id3).toBe('Doc 3');
     });
 
     it('should handle errors during list saving in preCacheAll', () => {
@@ -278,7 +283,13 @@ describe('Code.js', () => {
         expectedArticleCache.push(article);
       }
 
-      mockCache.get.mockImplementation((key) => (key === '0' ? JSON.stringify(allIds) : null));
+      const allTitles = {};
+      allIds.forEach((id, i) => { allTitles[id] = `Title ${i}`; });
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        if (key === 'titles') return JSON.stringify(allTitles);
+        return null;
+      });
       mockCache.getAll.mockReturnValue(articleCacheInMock);
 
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
@@ -290,6 +301,7 @@ describe('Code.js', () => {
       expect(mockCache.getAll).toHaveBeenCalledWith(allIds.slice(0, Code.PRE_CACHE_LIMIT));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
         ids: allIds,
+        titles: allTitles,
         article_cache: expectedArticleCache,
       }));
     });
@@ -341,7 +353,55 @@ describe('Code.js', () => {
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(TEST_FOLDER_ID);
       expect(mockCache.put).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"titles":{"id1":"Doc 1"}'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
+    });
+
+    it('should return only ids and titles for o=titles from cache, without article bodies', () => {
+      const allIds = ['id0', 'id1'];
+      const allTitles = { id0: 'Title 0', id1: 'Title 1' };
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        if (key === 'titles') return JSON.stringify(allTitles);
+        return null;
+      });
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'titles' } });
+
+      expect(mockCache.getAll).not.toHaveBeenCalled();
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: allIds,
+        titles: allTitles,
+      }));
+    });
+
+    it('should build ids and titles from file names on a cache miss for o=titles, without opening docs', () => {
+      mockCache.get.mockReturnValue(null);
+      const mockFiles = [
+        { getId: () => 'id1', getName: () => '2026-01-02 B' },
+        { getId: () => 'id2', getName: () => '2026-01-01 A' },
+      ];
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      });
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'titles' } });
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: ['id1', 'id2'],
+        titles: { id1: '2026-01-02 B', id2: '2026-01-01 A' },
+      }));
     });
 
     it('should return RSS XML when o=rss is specified', () => {
