@@ -178,6 +178,21 @@ export const doGet = (e) => {
 
   const cache = CacheService.getScriptCache();
 
+  // Lightweight variant for title search and the latest-article link:
+  // ids and titles only, never any article bodies, so it stays fast
+  // even when the article cache is cold.
+  if (output === 'titles') {
+    const cachedList = cache.get('0');
+    const cachedTitles = cache.get('titles');
+    if (cachedList && cachedTitles) {
+      return json_({ ids: JSON.parse(cachedList), titles: JSON.parse(cachedTitles) });
+    }
+    const docs = listDocsSortedByTitle_(getConfig_().folderId);
+    const titles = {};
+    docs.forEach((d) => { titles[d.id] = d.title; });
+    return json_({ ids: docs.map((d) => d.id), titles });
+  }
+
   if (!docId) {
     const cachedList = cache.get('0');
     const cachedTitles = cache.get('titles');
