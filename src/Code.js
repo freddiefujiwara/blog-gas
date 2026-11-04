@@ -26,13 +26,21 @@ export const preCacheAll = () => {
   console.log('Logs cleared');
 
   const cache = CacheService.getScriptCache();
-  const allIds = listDocIdsSortedByTitle_(getConfig_().folderId);
+  const docs = listDocsSortedByTitle_(getConfig_().folderId);
+  const allIds = docs.map((d) => d.id);
   const listPayload = JSON.stringify(allIds);
 
   try {
     if (listPayload.length < CACHE_SIZE_LIMIT) {
       cache.put('0', listPayload, CACHE_TTL);
       console.log('List saved');
+    }
+    const titles = {};
+    docs.forEach((d) => { titles[d.id] = d.title; });
+    const titlesPayload = JSON.stringify(titles);
+    if (titlesPayload.length < CACHE_SIZE_LIMIT) {
+      cache.put('titles', titlesPayload, CACHE_TTL);
+      console.log('Titles saved');
     }
   } catch (e) {
     console.error(`Failed to save list: ${e.message}`);
@@ -172,7 +180,20 @@ export const doGet = (e) => {
 
   if (!docId) {
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(getConfig_().folderId);
+    const cachedTitles = cache.get('titles');
+    let allIds;
+    let titles;
+    if (cachedList && cachedTitles) {
+      allIds = JSON.parse(cachedList);
+      titles = JSON.parse(cachedTitles);
+    } else {
+      // Titles travel with the id list so clients can offer title
+      // search over every article, not just the pre-cached few.
+      const docs = listDocsSortedByTitle_(getConfig_().folderId);
+      allIds = docs.map((d) => d.id);
+      titles = {};
+      docs.forEach((d) => { titles[d.id] = d.title; });
+    }
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
     const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
@@ -192,7 +213,7 @@ export const doGet = (e) => {
       return null;
     }).filter(Boolean);
 
-    return json_({ ids: allIds, article_cache: articleCache });
+    return json_({ ids: allIds, titles, article_cache: articleCache });
   }
 
   const cachedDoc = cache.get(docId);
@@ -212,15 +233,18 @@ export const doGet = (e) => {
 /** -----------------------------
  *  List: Docs IDs (sorted)
  *  ----------------------------- */
-export const listDocIdsSortedByTitle_ = (folderId) => {
+export const listDocsSortedByTitle_ = (folderId) => {
   const files = DriveApp.getFolderById(folderId).getFilesByType(MimeType.GOOGLE_DOCS);
   const docs = [];
   while (files.hasNext()) {
     const f = files.next();
     docs.push({ id: f.getId(), title: f.getName() });
   }
-  return docs.sort((a, b) => b.title.localeCompare(a.title, 'ja')).map(({ id }) => id);
+  return docs.sort((a, b) => b.title.localeCompare(a.title, 'ja'));
 };
+
+export const listDocIdsSortedByTitle_ = (folderId) =>
+  listDocsSortedByTitle_(folderId).map(({ id }) => id);
 
 /**
  * Check if Doc exists in folder and return info.
