@@ -738,6 +738,25 @@ export const escapeMdTable_ = (s) => s.replace(/\|/g, '\\|');
 /** -----------------------------
  *  RSS helpers
  *  ----------------------------- */
+const RSS_MONTH_NAMES_ = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const RSS_DAY_NAMES_ = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// Article titles start with their publication date (YYYY-MM-DD).
+// RSS readers sort items by <pubDate>, so derive it from the title.
+// The time of day is not recorded anywhere, so midnight JST stands
+// in for it. Returns null for titles without a valid leading date,
+// in which case the item is emitted without a <pubDate>.
+export const pubDateFromTitle_ = (title) => {
+  const m = String(title || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const weekday = RSS_DAY_NAMES_[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  return `${weekday}, ${m[3]} ${RSS_MONTH_NAMES_[month - 1]} ${m[1]} 00:00:00 +0900`;
+};
+
 const generateRSSResponse_ = () => {
   const props = PropertiesService.getScriptProperties();
   const indexStr = props.getProperty('RSS_DATA');
@@ -758,12 +777,15 @@ const generateRSSResponse_ = () => {
     }
   }
 
-  const itemsXml = items.length ? items.map((item) => `    <item>
+  const itemsXml = items.length ? items.map((item) => {
+    const pubDate = pubDateFromTitle_(item.title);
+    return `    <item>
       <title>${escapeXml_(item.title)}</title>
       <link>${escapeXml_(item.url)}</link>
-      <description>${escapeXml_(item.content)}</description>
+${pubDate ? `      <pubDate>${pubDate}</pubDate>\n` : ''}      <description>${escapeXml_(item.content)}</description>
       <guid>${escapeXml_(item.url)}</guid>
-    </item>`).join('\n') + '\n' : '';
+    </item>`;
+  }).join('\n') + '\n' : '';
 
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">

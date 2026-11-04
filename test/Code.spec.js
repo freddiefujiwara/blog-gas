@@ -367,6 +367,30 @@ describe('Code.js', () => {
       expect(mockTextOutput.setMimeType).toHaveBeenCalledWith('XML');
     });
 
+    it('should include a pubDate derived from the title date in RSS items', () => {
+      const chunkData = [
+        { id: 'id1', title: '2026-11-04 Dated Article', url: 'http://url1', content: 'Body' },
+        { id: 'id2', title: 'Undated Article', url: 'http://url2', content: 'Body' },
+      ];
+      mockProperties.getProperty.mockImplementation((key) => {
+        if (key === 'RSS_DATA') return JSON.stringify(['RSS_DATA001']);
+        if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
+        return TEST_CONFIG[key] ?? null;
+      });
+
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      const e = { parameter: { o: 'rss' } };
+      Code.doGet(e);
+
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<pubDate>Wed, 04 Nov 2026 00:00:00 +0900</pubDate>'));
+      const xml = mockContentService.createTextOutput.mock.calls[0][0];
+      expect((xml.match(/<pubDate>/g) || []).length).toBe(1);
+    });
+
     it('should handle article fetch errors and continue', () => {
       mockCache.get.mockReturnValue(JSON.stringify(['id1', 'id2']));
       mockCache.getAll.mockReturnValue({}); // Miss both
@@ -1084,6 +1108,20 @@ describe('Code.js', () => {
 
       expect(() => Code.saveLog_('boom')).not.toThrow();
       expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('saveLog_ error: Storage Full'));
+    });
+  });
+
+  describe('pubDateFromTitle_', () => {
+    it('formats the leading title date as an RFC 822 pubDate in JST', () => {
+      expect(Code.pubDateFromTitle_('2026-11-04 ホームページを壊さない仕組み')).toBe('Wed, 04 Nov 2026 00:00:00 +0900');
+      expect(Code.pubDateFromTitle_('2025-05-22 AIでのソフトウェアテスト手順')).toBe('Thu, 22 May 2025 00:00:00 +0900');
+    });
+
+    it('returns null when the title has no valid leading date', () => {
+      expect(Code.pubDateFromTitle_('日付のない記事')).toBeNull();
+      expect(Code.pubDateFromTitle_('2026-13-40 ありえない日付')).toBeNull();
+      expect(Code.pubDateFromTitle_('')).toBeNull();
+      expect(Code.pubDateFromTitle_(null)).toBeNull();
     });
   });
 
