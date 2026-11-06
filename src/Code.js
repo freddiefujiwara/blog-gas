@@ -330,6 +330,8 @@ export const OG_CACHE_TTL = 21600; // 6 hours: the CacheService maximum
 export const OG_FAILURE_CACHE_TTL = 600;
 export const OG_DESCRIPTION_LIMIT = 140;
 export const OG_SCAN_LIMIT = 200000;
+export const OG_FETCH_BATCH_SIZE = 20;
+export const OG_RESOLVE_BUDGET_MS = 40000;
 
 // OG data for the document currently being converted (per execution).
 let ogDataByUrl_ = {};
@@ -447,53 +449,75 @@ export const resolveOgData_ = (urls) => {
     });
     if (!misses.length) return result;
 
-    const requests = misses.map((url) => ({
-      url,
-      headers: {
-        Range: 'bytes=0-65535',
-        'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
-      },
-      muteHttpExceptions: true,
-      followRedirects: true,
-    }));
-    let responses = [];
-    try {
-      responses = UrlFetchApp.fetchAll(requests) || [];
-    } catch (e) {
-      // One unreachable URL can make the whole batch throw. Fall back to
-      // per-URL fetches so the other links still get their cards.
-      log_(`OG fetchAll failed: ${e.message}`);
-      responses = requests.map((req) => {
-        try {
-          return UrlFetchApp.fetch(req.url, req);
-        } catch (fetchError) {
-          log_(`OG fetch failed: ${req.url} (${fetchError.message})`);
-          return null;
-        }
-      });
-    }
-    misses.forEach((url, i) => {
-      let data = null;
-      try {
-        const res = responses[i];
-        if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
-          data = parseOgData_(res.getContentText(), url);
-          if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
-        } else if (res) {
-          log_(`OG fetch status ${res.getResponseCode()}: ${url}`);
-        }
-      } catch (e) {
-        data = null;
-      }
+    // Fetch in batches with an overall time budget. A single fetchAll
+    // over every miss makes the whole conversion hostage to the slowest
+    // or hanging host, and when the batch throws, the per-URL fallback
+    // turns serial (hundreds of links then blow the execution limit —
+    // seen 2026-11-06 with a 203-link article that never finished).
+    // Batching contains a failure to its batch, and once the budget is
+    // spent the remaining URLs are failure-cached without fetching, so
+    // the conversion always finishes; later conversions and the
+    // pre-cache trigger keep warming the per-URL cache.
+    const deadline = Date.now() + OG_RESOLVE_BUDGET_MS;
+    const storeResult_ = (url, data) => {
       if (data && (data.title || data.image)) {
         result[url] = data;
         try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
       } else {
-        // No usable OG data (or the fetch failed): remember briefly so
-        // repeated conversions do not refetch right away.
+        // No usable OG data (or the fetch failed / was skipped): remember
+        // briefly so repeated conversions do not refetch right away.
         try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
       }
-    });
+    };
+    for (let b = 0; b < misses.length; b += OG_FETCH_BATCH_SIZE) {
+      const batch = misses.slice(b, b + OG_FETCH_BATCH_SIZE);
+      if (Date.now() > deadline) {
+        log_(`OG resolve budget exceeded: skipping ${batch.length} URL(s)`);
+        batch.forEach((url) => storeResult_(url, null));
+        continue;
+      }
+      const requests = batch.map((url) => ({
+        url,
+        headers: {
+          Range: 'bytes=0-65535',
+          'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
+        },
+        muteHttpExceptions: true,
+        followRedirects: true,
+      }));
+      let responses = [];
+      try {
+        responses = UrlFetchApp.fetchAll(requests) || [];
+      } catch (e) {
+        // One unreachable URL can make the whole batch throw. Fall back
+        // to per-URL fetches for this batch only, still under the budget.
+        log_(`OG fetchAll failed: ${e.message}`);
+        responses = requests.map((req) => {
+          if (Date.now() > deadline) return null;
+          try {
+            return UrlFetchApp.fetch(req.url, req);
+          } catch (fetchError) {
+            log_(`OG fetch failed: ${req.url} (${fetchError.message})`);
+            return null;
+          }
+        });
+      }
+      batch.forEach((url, i) => {
+        let data = null;
+        try {
+          const res = responses[i];
+          if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
+            data = parseOgData_(res.getContentText(), url);
+            if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
+          } else if (res) {
+            log_(`OG fetch status ${res.getResponseCode()}: ${url}`);
+          }
+        } catch (e) {
+          data = null;
+        }
+        storeResult_(url, data);
+      });
+    }
     return result;
   } catch (e) {
     log_(`OG resolve failed: ${e.message}`);

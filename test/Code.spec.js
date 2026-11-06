@@ -1576,6 +1576,58 @@ describe('Code.js', () => {
         expect(Code.resolveOgData_([URL_A])).toEqual({});
         expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG no data'));
       });
+
+      it('fetches misses in batches of OG_FETCH_BATCH_SIZE', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 5 }, (_, i) => `https://example.com/item-${i}`);
+        mockUrlFetchApp.fetchAll.mockImplementation((requests) => requests.map(() => ({
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        })));
+        const result = Code.resolveOgData_(urls);
+        expect(mockUrlFetchApp.fetchAll).toHaveBeenCalledTimes(2);
+        expect(mockUrlFetchApp.fetchAll.mock.calls[0][0]).toHaveLength(Code.OG_FETCH_BATCH_SIZE);
+        expect(mockUrlFetchApp.fetchAll.mock.calls[1][0]).toHaveLength(5);
+        expect(Object.keys(result)).toHaveLength(urls.length);
+      });
+
+      it('contains a throwing batch to that batch only', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 1 }, (_, i) => `https://example.com/item-${i}`);
+        let call = 0;
+        mockUrlFetchApp.fetchAll.mockImplementation((requests) => {
+          call += 1;
+          if (call === 1) throw new Error('batch aborted');
+          return requests.map(() => ({
+            getResponseCode: () => 200,
+            getContentText: () => ogHtml(),
+          }));
+        });
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 500,
+          getContentText: () => '',
+        });
+        const result = Code.resolveOgData_(urls);
+        expect(result[urls[0]]).toBeUndefined();
+        expect(result[urls[Code.OG_FETCH_BATCH_SIZE]].title).toBe('Example Title');
+      });
+
+      it('stops fetching once the time budget is spent and failure-caches the rest', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 5 }, (_, i) => `https://example.com/item-${i}`);
+        const nowSpy = vi.spyOn(Date, 'now');
+        nowSpy.mockReturnValueOnce(1000);
+        nowSpy.mockReturnValue(1000 + Code.OG_RESOLVE_BUDGET_MS + 1);
+        try {
+          const result = Code.resolveOgData_(urls);
+          expect(result).toEqual({});
+          expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+          expect(mockCache.put).toHaveBeenCalledWith(
+            Code.ogCacheKey_(urls[0]),
+            JSON.stringify({}),
+            Code.OG_FAILURE_CACHE_TTL,
+          );
+        } finally {
+          nowSpy.mockRestore();
+        }
+      });
     });
 
     describe('linkCardMarkdown_', () => {
