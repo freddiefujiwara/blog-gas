@@ -50,11 +50,17 @@ export const preCacheAll = () => {
     try {
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
-      const payload = JSON.stringify({ id, title, markdown: docBodyToMarkdown_(doc) });
+      const article = { id, title, markdown: docBodyToMarkdown_(doc) };
 
-      if (payload.length < CACHE_SIZE_LIMIT) {
-        cache.put(id, payload, CACHE_TTL);
+      if (JSON.stringify(article).length < CACHE_SIZE_LIMIT) {
+        cache.put(id, JSON.stringify(article), CACHE_TTL);
         console.log(`Saved: ${title}`);
+      } else {
+        // Too large for CacheService: keep the conversion in the
+        // Drive-backed cache instead of dropping it (a 203-link
+        // article was re-converted on every request before this).
+        writeDriveArticleCache_(article);
+        console.log(`Saved to Drive cache: ${title}`);
       }
     } catch (e) {
       console.error(`Failed to save ID:${id}: ${e.message}`);
@@ -75,6 +81,8 @@ export const dailyRSSCache = () => {
     const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
       const cachedArticle = cache.get(id);
       if (cachedArticle) return JSON.parse(cachedArticle);
+      const driveCached = readDriveArticleCache_(id);
+      if (driveCached) return driveCached;
       log_(`RSS Cache: Article (ID:${id}) not in cache. Fetching from DocumentApp...`);
       try {
         const doc = DocumentApp.openById(id);
@@ -168,6 +176,55 @@ export const clearCacheAll = () => {
   console.log('Cache cleared');
 };
 
+/** -----------------------------
+ *  Drive-backed article cache for articles whose converted payload
+ *  is too large for CacheService (100 KB per value). The converted
+ *  JSON is kept in an "article-cache" subfolder of the article
+ *  folder, stamped with the source Doc's last-modified time; a read
+ *  only serves it when the stamp still matches, so a regenerated
+ *  Doc is never shadowed by a stale conversion.
+ *  ----------------------------- */
+export const ARTICLE_CACHE_FOLDER_NAME = 'article-cache';
+
+export const getArticleCacheFolder_ = () => {
+  // Resolved per call on purpose: Apps Script does not persist module state
+  // across executions, so memoizing the folder would buy nothing in
+  // production (and it makes tests order-dependent).
+  const parent = DriveApp.getFolderById(getConfig_().folderId);
+  const folders = parent.getFoldersByName(ARTICLE_CACHE_FOLDER_NAME);
+  return folders.hasNext() ? folders.next() : parent.createFolder(ARTICLE_CACHE_FOLDER_NAME);
+};
+
+export const readDriveArticleCache_ = (docId) => {
+  try {
+    const files = getArticleCacheFolder_().getFilesByName(`${docId}.json`);
+    if (!files.hasNext()) return null;
+    const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    const sourceModified = DriveApp.getFileById(docId).getLastUpdated().getTime();
+    if (!data || data.sourceModified !== sourceModified || !data.markdown) return null;
+    return { id: data.id, title: data.title, markdown: data.markdown };
+  } catch (e) {
+    log_(`Drive article cache read failed (${docId}): ${e.message}`);
+    return null;
+  }
+};
+
+export const writeDriveArticleCache_ = (article) => {
+  try {
+    const sourceModified = DriveApp.getFileById(article.id).getLastUpdated().getTime();
+    const payload = JSON.stringify({ ...article, sourceModified });
+    const folder = getArticleCacheFolder_();
+    const files = folder.getFilesByName(`${article.id}.json`);
+    if (files.hasNext()) {
+      files.next().setContent(payload);
+    } else {
+      folder.createFile(`${article.id}.json`, payload, MimeType.PLAIN_TEXT);
+    }
+  } catch (e) {
+    log_(`Drive article cache write failed (${article.id}): ${e.message}`);
+  }
+};
+
 /**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
@@ -215,6 +272,8 @@ export const doGet = (e) => {
     const cachedArticles = cache.getAll(targetIds);
     const articleCache = targetIds.map((id) => {
       if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
+      const driveCached = readDriveArticleCache_(id);
+      if (driveCached) return driveCached;
       log_(`Article (ID:${id}) not in cache. Fetching...`);
       try {
         const info = getDocInfoInFolder_(getConfig_().folderId, id);
@@ -235,6 +294,12 @@ export const doGet = (e) => {
   if (cachedDoc) {
     log_(`Document (ID:${docId}) retrieved from cache`);
     return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const driveCached = readDriveArticleCache_(docId);
+  if (driveCached) {
+    log_(`Document (ID:${docId}) retrieved from Drive cache`);
+    return json_(driveCached);
   }
 
   log_(`Document (ID:${docId}) not in cache. Generating...`);
@@ -330,6 +395,9 @@ export const OG_CACHE_TTL = 21600; // 6 hours: the CacheService maximum
 export const OG_FAILURE_CACHE_TTL = 600;
 export const OG_DESCRIPTION_LIMIT = 140;
 export const OG_SCAN_LIMIT = 200000;
+export const OG_FETCH_BATCH_SIZE = 20;
+export const OG_RESOLVE_BUDGET_MS = 40000;
+export const OGP_API_CHUNK_CHARS = 1600;
 
 // OG data for the document currently being converted (per execution).
 let ogDataByUrl_ = {};
@@ -447,58 +515,150 @@ export const resolveOgData_ = (urls) => {
     });
     if (!misses.length) return result;
 
-    const requests = misses.map((url) => ({
-      url,
-      headers: {
-        Range: 'bytes=0-65535',
-        'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
-      },
-      muteHttpExceptions: true,
-      followRedirects: true,
-    }));
-    let responses = [];
+    // Tier 2: the shared OGP API (ogp-api-gas), when its base URL is
+    // set in the OGP_API_BASE_URL script property. The API's own
+    // cache is kept warm by a 6-hour trigger, so this is normally a
+    // few fast batched GETs; whatever it returns is written back to
+    // the local cache. If the API call itself fails, fall through to
+    // the direct batched fetch below.
+    let apiData = null;
     try {
-      responses = UrlFetchApp.fetchAll(requests) || [];
+      apiData = fetchOgDataFromApi_(misses);
     } catch (e) {
-      // One unreachable URL can make the whole batch throw. Fall back to
-      // per-URL fetches so the other links still get their cards.
-      log_(`OG fetchAll failed: ${e.message}`);
-      responses = requests.map((req) => {
-        try {
-          return UrlFetchApp.fetch(req.url, req);
-        } catch (fetchError) {
-          log_(`OG fetch failed: ${req.url} (${fetchError.message})`);
-          return null;
+      log_(`OG API lookup failed: ${e.message}`);
+    }
+    if (apiData) {
+      misses.forEach((url) => {
+        const d = apiData[url];
+        if (d && (d.title || d.image)) {
+          result[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
+          try { cache.put(ogCacheKey_(url), JSON.stringify(result[url]), OG_CACHE_TTL); } catch (e) { /* ignore */ }
+        } else {
+          // The API answered but has no data for this URL: remember
+          // briefly instead of refetching the origin directly.
+          try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
         }
       });
+      return result;
     }
-    misses.forEach((url, i) => {
-      let data = null;
-      try {
-        const res = responses[i];
-        if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
-          data = parseOgData_(res.getContentText(), url);
-          if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
-        } else if (res) {
-          log_(`OG fetch status ${res.getResponseCode()}: ${url}`);
-        }
-      } catch (e) {
-        data = null;
-      }
+
+    // Fetch in batches with an overall time budget. A single fetchAll
+    // over every miss makes the whole conversion hostage to the slowest
+    // or hanging host, and when the batch throws, the per-URL fallback
+    // turns serial (hundreds of links then blow the execution limit —
+    // seen 2026-11-06 with a 203-link article that never finished).
+    // Batching contains a failure to its batch, and once the budget is
+    // spent the remaining URLs are failure-cached without fetching, so
+    // the conversion always finishes; later conversions and the
+    // pre-cache trigger keep warming the per-URL cache.
+    const deadline = Date.now() + OG_RESOLVE_BUDGET_MS;
+    const storeResult_ = (url, data) => {
       if (data && (data.title || data.image)) {
         result[url] = data;
         try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
       } else {
-        // No usable OG data (or the fetch failed): remember briefly so
-        // repeated conversions do not refetch right away.
+        // No usable OG data (or the fetch failed / was skipped): remember
+        // briefly so repeated conversions do not refetch right away.
         try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
       }
-    });
+    };
+    for (let b = 0; b < misses.length; b += OG_FETCH_BATCH_SIZE) {
+      const batch = misses.slice(b, b + OG_FETCH_BATCH_SIZE);
+      if (Date.now() > deadline) {
+        log_(`OG resolve budget exceeded: skipping ${batch.length} URL(s)`);
+        batch.forEach((url) => storeResult_(url, null));
+        continue;
+      }
+      const requests = batch.map((url) => ({
+        url,
+        headers: {
+          Range: 'bytes=0-65535',
+          'User-Agent': 'Mozilla/5.0 (compatible; blog-gas link-card)',
+        },
+        muteHttpExceptions: true,
+        followRedirects: true,
+      }));
+      let responses = [];
+      try {
+        responses = UrlFetchApp.fetchAll(requests) || [];
+      } catch (e) {
+        // One unreachable URL can make the whole batch throw. Fall back
+        // to per-URL fetches for this batch only, still under the budget.
+        log_(`OG fetchAll failed: ${e.message}`);
+        responses = requests.map((req) => {
+          if (Date.now() > deadline) return null;
+          try {
+            return UrlFetchApp.fetch(req.url, req);
+          } catch (fetchError) {
+            log_(`OG fetch failed: ${req.url} (${fetchError.message})`);
+            return null;
+          }
+        });
+      }
+      batch.forEach((url, i) => {
+        let data = null;
+        try {
+          const res = responses[i];
+          if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
+            data = parseOgData_(res.getContentText(), url);
+            if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
+          } else if (res) {
+            log_(`OG fetch status ${res.getResponseCode()}: ${url}`);
+          }
+        } catch (e) {
+          data = null;
+        }
+        storeResult_(url, data);
+      });
+    }
     return result;
   } catch (e) {
     log_(`OG resolve failed: ${e.message}`);
     return result;
   }
+};
+
+/**
+ * Ask the shared OGP API for many URLs at once. Returns null when the
+ * API is not configured (OGP_API_BASE_URL unset); throws when it is
+ * configured but unreachable or answers an error, so the caller can
+ * fall back to direct fetching. URLs travel in a `urls` query
+ * parameter joined by '|' (each URL percent-encoded), chunked so
+ * every GET stays well under URL length limits, and all chunks go
+ * out in a single parallel fetchAll.
+ */
+export const fetchOgDataFromApi_ = (urls) => {
+  const base = String(PropertiesService.getScriptProperties().getProperty('OGP_API_BASE_URL') || '').replace(/\/+$/, '');
+  if (!base) return null;
+  const chunks = [];
+  let current = [];
+  let currentLen = 0;
+  urls.forEach((url) => {
+    const len = encodeURIComponent(url).length + 1;
+    if (current.length && currentLen + len > OGP_API_CHUNK_CHARS) {
+      chunks.push(current);
+      current = [];
+      currentLen = 0;
+    }
+    current.push(url);
+    currentLen += len;
+  });
+  if (current.length) chunks.push(current);
+  const requests = chunks.map((chunk) => ({
+    url: `${base}?urls=${chunk.map((u) => encodeURIComponent(u)).join('|')}`,
+    muteHttpExceptions: true,
+    followRedirects: true,
+  }));
+  const responses = UrlFetchApp.fetchAll(requests) || [];
+  const result = {};
+  responses.forEach((res) => {
+    if (!res || res.getResponseCode() !== 200) {
+      throw new Error(`OGP API status ${res ? res.getResponseCode() : 'no response'}`);
+    }
+    const parsed = JSON.parse(res.getContentText());
+    Object.assign(result, (parsed && parsed.results) || {});
+  });
+  return result;
 };
 
 /** -----------------------------
