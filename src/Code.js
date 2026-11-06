@@ -15,6 +15,7 @@ export const getConfig_ = () => {
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
+export const PRE_CACHE_TIME_BUDGET_MS = 270000;
 export const RSS_CACHE_LIMIT = 50;
 export const IMAGE_FOLDER_NAME = 'images';
 
@@ -46,8 +47,30 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  for (const id of allIds.slice(0, PRE_CACHE_LIMIT)) {
+  // Cover every article, not just the newest few: conversions are
+  // never persisted on the request path, so an article outside the
+  // pre-cache set was re-converted on every single view (an old,
+  // large article took ~20s per load). Articles whose cache is still
+  // valid are skipped — CacheService entries by presence, Drive
+  // entries by the Doc's last-updated time — so a run only converts
+  // what changed or expired. Conversions stop when the time budget
+  // runs out (executions are capped at 6 minutes); whatever is left
+  // is picked up by the next run, which skips everything done here.
+  const startedAt = Date.now();
+  let converted = 0;
+  let skipped = 0;
+  for (const id of allIds) {
     try {
+      if (cache.get(id) || readDriveArticleCache_(id)) {
+        skipped++;
+        continue;
+      }
+      if (Date.now() - startedAt > PRE_CACHE_TIME_BUDGET_MS) {
+        console.log(
+          `Pre-cache time budget reached: ${converted} converted, ${skipped} skipped, ${allIds.length - converted - skipped} left for the next run`
+        );
+        break;
+      }
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
       const article = { id, title, markdown: docBodyToMarkdown_(doc) };
@@ -62,10 +85,12 @@ export const preCacheAll = () => {
         writeDriveArticleCache_(article);
         console.log(`Saved to Drive cache: ${title}`);
       }
+      converted++;
     } catch (e) {
       console.error(`Failed to save ID:${id}: ${e.message}`);
     }
   }
+  console.log(`Pre-cache done: ${converted} converted, ${skipped} skipped`);
 };
 
 /**

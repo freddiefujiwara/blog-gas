@@ -127,7 +127,7 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("Logs cleared");
     });
 
-    it('should save the list and the first PRE_CACHE_LIMIT documents', () => {
+    it('should save the list and every document, not just the first PRE_CACHE_LIMIT', () => {
       const mockFiles = [];
       for (let i = 0; i < Code.PRE_CACHE_LIMIT + 5; i++) {
         mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
@@ -159,13 +159,51 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
-      // 1 for the list, 1 for the titles, and up to PRE_CACHE_LIMIT for the documents
-      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 2);
+      // 1 for the list, 1 for the titles, and one per document (all of them)
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 5 + 2);
       const titlesCall = mockCache.put.mock.calls.find((c) => c[0] === 'titles');
       expect(titlesCall).toBeDefined();
       const savedTitles = JSON.parse(titlesCall[1]);
       expect(Object.keys(savedTitles)).toHaveLength(Code.PRE_CACHE_LIMIT + 5);
       expect(savedTitles.id3).toBe('Doc 3');
+    });
+
+    it('should skip documents that are still in CacheService', () => {
+      const mockFiles = [];
+      for (let i = 0; i < 3; i++) {
+        mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
+      }
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      mockCache.get.mockImplementation((key) => (key === 'id1' ? '{"cached":true}' : null));
+
+      mockDocumentApp.openById.mockImplementation((id) => ({
+        getName: () => `Doc ${id.replace('id', '')}`,
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => ({
+              getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+              getNumChildren: () => 0,
+            }),
+          }),
+        }),
+      }));
+
+      Code.preCacheAll();
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalledWith('id1');
+      expect(mockCache.put).toHaveBeenCalledWith('id0', expect.any(String), Code.CACHE_TTL);
+      expect(mockCache.put).toHaveBeenCalledWith('id2', expect.any(String), Code.CACHE_TTL);
+      expect(mockCache.put).not.toHaveBeenCalledWith('id1', expect.any(String), Code.CACHE_TTL);
     });
 
     it('should handle errors during list saving in preCacheAll', () => {
