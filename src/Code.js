@@ -405,12 +405,13 @@ let ogDataByUrl_ = {};
 export const ogCacheKey_ = (url) => {
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
     .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
-  // Generation "v2" (2026-11-07): entries written by the old direct-fetch
-  // path (Shift_JIS mojibake for Rakuten, imageless cards for sites without
-  // OGP) are abandoned under the old prefix and expire on their own. All
-  // reads/writes now go through this key, so the next conversion rebuilds
-  // every card via the OGP API tier.
-  return `og:v2:${digest}`;
+  // Generation "v3" (2026-11-07): the OGP API changed the list-card
+  // shape (short product name as the title, price + properties as the
+  // description), so v2 entries — full-length titles, some with item
+  // comments in the description — are abandoned under the old prefix
+  // and expire on their own. All reads/writes now go through this
+  // key, so the next conversion rebuilds every card via the API tier.
+  return `og:v3:${digest}`;
 };
 
 export const standaloneLinkUrl_ = (p) => {
