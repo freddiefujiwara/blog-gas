@@ -1914,6 +1914,18 @@ describe('Code.js', () => {
       expect(req.url).toBe(`${API_BASE}?urls=${encodeURIComponent(URL_A)}`);
     });
 
+    it('fetchOgDataFromApi_ percent-encodes the batch separator (UrlFetchApp rejects a raw |)', () => {
+      const URL_B = 'https://example.com/article-b';
+      mockUrlFetchApp.fetchAll.mockReturnValue([{
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ results: {} }),
+      }]);
+      Code.fetchOgDataFromApi_([URL_A, URL_B]);
+      const req = mockUrlFetchApp.fetchAll.mock.calls[0][0][0];
+      expect(req.url).toBe(`${API_BASE}?urls=${encodeURIComponent(URL_A)}%7C${encodeURIComponent(URL_B)}`);
+      expect(req.url).not.toContain('|');
+    });
+
     it('resolveOgData_ prefers the API and writes results back to the local cache', () => {
       mockUrlFetchApp.fetchAll.mockReturnValue([{
         getResponseCode: () => 200,
