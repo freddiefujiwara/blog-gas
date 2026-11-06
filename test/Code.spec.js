@@ -168,6 +168,48 @@ describe('Code.js', () => {
       expect(savedTitles.id3).toBe('Doc 3');
     });
 
+    it('should also save pinned documents outside the first PRE_CACHE_LIMIT', () => {
+      const mockFiles = [];
+      for (let i = 0; i < Code.PRE_CACHE_LIMIT + 5; i++) {
+        mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
+      }
+      let index = 0;
+      const mockIterator = {
+        hasNext: () => index < mockFiles.length,
+        next: () => mockFiles[index++],
+      };
+      const mockFolder = {
+        getFilesByType: vi.fn().mockReturnValue(mockIterator),
+      };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+      // Title-descending order puts "Doc 0" last (outside the newest
+      // window); id3 is already inside it and must not convert twice.
+      mockProperties.getProperty.mockImplementation((key) =>
+        key === 'PRE_CACHE_PINNED_IDS' ? 'id0, id3' : (TEST_CONFIG[key] ?? null)
+      );
+
+      mockDocumentApp.openById.mockImplementation((id) => ({
+        getName: () => `Doc ${id.replace('id', '')}`,
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => ({
+              getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+              getNumChildren: () => 0,
+            }),
+          }),
+        }),
+      }));
+
+      Code.preCacheAll();
+
+      // list + titles + PRE_CACHE_LIMIT newest + the one pinned extra
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 3);
+      expect(mockCache.put).toHaveBeenCalledWith('id0', expect.any(String), Code.CACHE_TTL);
+      expect(mockDocumentApp.openById.mock.calls.filter((c) => c[0] === 'id3')).toHaveLength(1);
+    });
+
     it('should handle errors during list saving in preCacheAll', () => {
       const mockIterator = { hasNext: () => false };
       const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };

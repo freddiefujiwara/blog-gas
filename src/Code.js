@@ -7,6 +7,10 @@ export const getConfig_ = () => {
   const props = PropertiesService.getScriptProperties();
   return {
     folderId: props.getProperty('FOLDER_ID') || '',
+    pinnedIds: (props.getProperty('PRE_CACHE_PINNED_IDS') || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     siteTitle: props.getProperty('SITE_TITLE') || 'Blog',
     siteUrl: (props.getProperty('SITE_URL') || '').replace(/\/+$/, ''),
     siteDescription: props.getProperty('SITE_DESCRIPTION') || 'Recent articles',
@@ -46,7 +50,16 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  for (const id of allIds.slice(0, PRE_CACHE_LIMIT)) {
+  // The newest PRE_CACHE_LIMIT articles, plus any pinned articles
+  // (PRE_CACHE_PINNED_IDS) that must stay cached no matter how old
+  // they are — large evergreen articles otherwise fall out of the
+  // window and are re-converted on every view (~20s a load).
+  const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
+  for (const id of getConfig_().pinnedIds) {
+    if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
+  }
+
+  for (const id of targetIds) {
     try {
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
