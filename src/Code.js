@@ -645,7 +645,10 @@ export const fetchOgDataFromApi_ = (urls) => {
   });
   if (current.length) chunks.push(current);
   const requests = chunks.map((chunk) => ({
-    url: `${base}?urls=${chunk.map((u) => encodeURIComponent(u)).join('|')}`,
+    // The separator must be percent-encoded: UrlFetchApp rejects a raw '|'
+    // in the request URL ("Invalid argument"). The API decodes %7C back to
+    // '|' when parsing the parameter, so the split still works server-side.
+    url: `${base}?urls=${chunk.map((u) => encodeURIComponent(u)).join('%7C')}`,
     muteHttpExceptions: true,
     followRedirects: true,
   }));
