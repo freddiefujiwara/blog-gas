@@ -86,6 +86,7 @@ const mockDocumentApp = {
 
 const mockMimeType = {
   GOOGLE_DOCS: 'GOOGLE_DOCS',
+  PLAIN_TEXT: 'PLAIN_TEXT',
 };
 
 const mockUrlFetchApp = {
@@ -1576,6 +1577,58 @@ describe('Code.js', () => {
         expect(Code.resolveOgData_([URL_A])).toEqual({});
         expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG no data'));
       });
+
+      it('fetches misses in batches of OG_FETCH_BATCH_SIZE', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 5 }, (_, i) => `https://example.com/item-${i}`);
+        mockUrlFetchApp.fetchAll.mockImplementation((requests) => requests.map(() => ({
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        })));
+        const result = Code.resolveOgData_(urls);
+        expect(mockUrlFetchApp.fetchAll).toHaveBeenCalledTimes(2);
+        expect(mockUrlFetchApp.fetchAll.mock.calls[0][0]).toHaveLength(Code.OG_FETCH_BATCH_SIZE);
+        expect(mockUrlFetchApp.fetchAll.mock.calls[1][0]).toHaveLength(5);
+        expect(Object.keys(result)).toHaveLength(urls.length);
+      });
+
+      it('contains a throwing batch to that batch only', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 1 }, (_, i) => `https://example.com/item-${i}`);
+        let call = 0;
+        mockUrlFetchApp.fetchAll.mockImplementation((requests) => {
+          call += 1;
+          if (call === 1) throw new Error('batch aborted');
+          return requests.map(() => ({
+            getResponseCode: () => 200,
+            getContentText: () => ogHtml(),
+          }));
+        });
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 500,
+          getContentText: () => '',
+        });
+        const result = Code.resolveOgData_(urls);
+        expect(result[urls[0]]).toBeUndefined();
+        expect(result[urls[Code.OG_FETCH_BATCH_SIZE]].title).toBe('Example Title');
+      });
+
+      it('stops fetching once the time budget is spent and failure-caches the rest', () => {
+        const urls = Array.from({ length: Code.OG_FETCH_BATCH_SIZE + 5 }, (_, i) => `https://example.com/item-${i}`);
+        const nowSpy = vi.spyOn(Date, 'now');
+        nowSpy.mockReturnValueOnce(1000);
+        nowSpy.mockReturnValue(1000 + Code.OG_RESOLVE_BUDGET_MS + 1);
+        try {
+          const result = Code.resolveOgData_(urls);
+          expect(result).toEqual({});
+          expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+          expect(mockCache.put).toHaveBeenCalledWith(
+            Code.ogCacheKey_(urls[0]),
+            JSON.stringify({}),
+            Code.OG_FAILURE_CACHE_TTL,
+          );
+        } finally {
+          nowSpy.mockRestore();
+        }
+      });
     });
 
     describe('linkCardMarkdown_', () => {
@@ -1829,6 +1882,140 @@ describe('Code.js', () => {
         const fetchedUrls = mockUrlFetchApp.fetchAll.mock.calls.flatMap((c) => (Array.isArray(c[0]) ? c[0].map((r) => r.url) : []));
         expect(fetchedUrls).not.toContain(ROOM_URL);
       });
+    });
+  });
+
+  describe('OGP API tier', () => {
+    const URL_A = 'https://example.com/article-a';
+    const API_BASE = 'https://script.google.com/macros/s/OGP_API/exec';
+    const ogHtml = () => '<html><head><meta property="og:title" content="Example Title"><meta property="og:image" content="https://example.com/og.jpg"></head></html>';
+
+    beforeEach(() => {
+      mockCache.getAll.mockReturnValue({});
+      mockUrlFetchApp.fetchAll.mockReset();
+      mockUrlFetchApp.fetch.mockReset();
+      mockProperties.getProperty.mockImplementation((key) => (key === 'OGP_API_BASE_URL' ? API_BASE : (TEST_CONFIG[key] ?? null)));
+    });
+
+    it('fetchOgDataFromApi_ returns null when the API is not configured', () => {
+      mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
+      expect(Code.fetchOgDataFromApi_([URL_A])).toBeNull();
+      expect(mockUrlFetchApp.fetchAll).not.toHaveBeenCalled();
+    });
+
+    it('fetchOgDataFromApi_ queries the API in one fetchAll and merges results', () => {
+      mockUrlFetchApp.fetchAll.mockReturnValue([{
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ results: { [URL_A]: { title: 'API Title', image: 'https://example.com/a.jpg', description: 'D' } } }),
+      }]);
+      const data = Code.fetchOgDataFromApi_([URL_A]);
+      expect(data[URL_A].title).toBe('API Title');
+      const req = mockUrlFetchApp.fetchAll.mock.calls[0][0][0];
+      expect(req.url).toBe(`${API_BASE}?urls=${encodeURIComponent(URL_A)}`);
+    });
+
+    it('resolveOgData_ prefers the API and writes results back to the local cache', () => {
+      mockUrlFetchApp.fetchAll.mockReturnValue([{
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ results: { [URL_A]: { title: 'API Title', image: '', description: '' } } }),
+      }]);
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].title).toBe('API Title');
+      expect(mockCache.put).toHaveBeenCalledWith(
+        Code.ogCacheKey_(URL_A),
+        expect.stringContaining('API Title'),
+        Code.OG_CACHE_TTL,
+      );
+      const fetchedUrls = mockUrlFetchApp.fetchAll.mock.calls.flatMap((c) => c[0].map((r) => r.url));
+      expect(fetchedUrls.every((u) => u.startsWith(API_BASE))).toBe(true);
+    });
+
+    it('resolveOgData_ falls back to direct fetching when the API errors', () => {
+      let call = 0;
+      mockUrlFetchApp.fetchAll.mockImplementation((requests) => {
+        call += 1;
+        if (call === 1) return [{ getResponseCode: () => 500, getContentText: () => 'err' }];
+        return requests.map(() => ({ getResponseCode: () => 200, getContentText: () => ogHtml() }));
+      });
+      const result = Code.resolveOgData_([URL_A]);
+      expect(result[URL_A].title).toBe('Example Title');
+    });
+  });
+
+  describe('Drive article cache', () => {
+    const MODIFIED = 1700000000000;
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      content,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+      createFile: vi.fn((name, content) => {
+        const f = makeFile(name, content);
+        stored.set(name, f);
+        return f;
+      }),
+    };
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      cacheFolder.createFile.mockClear();
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+        getFilesByType: vi.fn(() => ({ hasNext: () => false })),
+      });
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+    });
+
+    it('writeDriveArticleCache_ creates a stamped JSON file', () => {
+      Code.writeDriveArticleCache_({ id: 'doc-x', title: 'T', markdown: 'MD' });
+      expect(cacheFolder.createFile).toHaveBeenCalledWith('doc-x.json', expect.any(String), 'PLAIN_TEXT');
+      const saved = JSON.parse(stored.get('doc-x.json').content);
+      expect(saved).toEqual({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED });
+    });
+
+    it('writeDriveArticleCache_ overwrites an existing file via setContent', () => {
+      const existing = makeFile('doc-x.json', '{}');
+      stored.set('doc-x.json', existing);
+      Code.writeDriveArticleCache_({ id: 'doc-x', title: 'T2', markdown: 'MD2' });
+      expect(existing.setContent).toHaveBeenCalled();
+      expect(cacheFolder.createFile).not.toHaveBeenCalled();
+    });
+
+    it('readDriveArticleCache_ serves a fresh entry and rejects stale or missing ones', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED })));
+      expect(Code.readDriveArticleCache_('doc-x')).toEqual({ id: 'doc-x', title: 'T', markdown: 'MD' });
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED - 1 })));
+      expect(Code.readDriveArticleCache_('doc-x')).toBeNull();
+      expect(Code.readDriveArticleCache_('missing')).toBeNull();
+    });
+
+    it('preCacheAll stores oversized articles in the Drive cache instead of CacheService', () => {
+      const mockFiles = [{ getId: () => 'large-id', getName: () => 'Large Doc' }];
+      let index = 0;
+      const iterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(iterator),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+      const largeContent = 'a'.repeat(Code.CACHE_SIZE_LIMIT);
+      mockDocumentApp.openById.mockImplementation(() => ({
+        getName: () => 'Large Doc',
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({ getType: () => 'UNKNOWN', getText: () => largeContent }),
+        }),
+      }));
+      Code.preCacheAll();
+      expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
+      expect(stored.has('large-id.json')).toBe(true);
     });
   });
 });
