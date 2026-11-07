@@ -159,13 +159,18 @@ describe('Code.js', () => {
       Code.preCacheAll();
 
       expect(mockCache.put).toHaveBeenCalledWith('0', expect.any(String), Code.CACHE_TTL);
-      // 1 for the list, 1 for the titles, and up to PRE_CACHE_LIMIT for the documents
-      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 2);
+      // 1 for the list, 1 for the titles, 1 for the tags map, and up to PRE_CACHE_LIMIT for the documents
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 3);
       const titlesCall = mockCache.put.mock.calls.find((c) => c[0] === 'titles');
       expect(titlesCall).toBeDefined();
       const savedTitles = JSON.parse(titlesCall[1]);
       expect(Object.keys(savedTitles)).toHaveLength(Code.PRE_CACHE_LIMIT + 5);
       expect(savedTitles.id3).toBe('Doc 3');
+      const tagsCall = mockCache.put.mock.calls.find((c) => c[0] === 'tags');
+      expect(tagsCall).toBeDefined();
+      const savedTags = JSON.parse(tagsCall[1]);
+      expect(Object.keys(savedTags)).toHaveLength(Code.PRE_CACHE_LIMIT + 5);
+      expect(savedTags.id3).toEqual([]);
     });
 
     it('should also save pinned documents outside the first PRE_CACHE_LIMIT', () => {
@@ -204,8 +209,8 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      // list + titles + PRE_CACHE_LIMIT newest + the one pinned extra
-      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 3);
+      // list + titles + tags + PRE_CACHE_LIMIT newest + the one pinned extra
+      expect(mockCache.put).toHaveBeenCalledTimes(Code.PRE_CACHE_LIMIT + 4);
       expect(mockCache.put).toHaveBeenCalledWith('id0', expect.any(String), Code.CACHE_TTL);
       expect(mockDocumentApp.openById.mock.calls.filter((c) => c[0] === 'id3')).toHaveLength(1);
     });
@@ -270,8 +275,10 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      // Should only call put for the list ('0'), not for the document
-      expect(mockCache.put).toHaveBeenCalledTimes(1);
+      // Should not call put for the document itself (the list put
+      // throws via a leaked mock from the error test above; the
+      // tags map put is the only other call)
+      expect(mockCache.put).toHaveBeenCalledTimes(2);
       expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
     });
   });
@@ -328,9 +335,13 @@ describe('Code.js', () => {
 
       const allTitles = {};
       allIds.forEach((id, i) => { allTitles[id] = `Title ${i}`; });
+      const allTags = {};
+      allIds.forEach((id) => { allTags[id] = []; });
+      allTags.id0 = ['運営', '技術'];
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
         if (key === 'titles') return JSON.stringify(allTitles);
+        if (key === 'tags') return JSON.stringify(allTags);
         return null;
       });
       mockCache.getAll.mockReturnValue(articleCacheInMock);
@@ -346,6 +357,7 @@ describe('Code.js', () => {
         ids: allIds,
         titles: allTitles,
         article_cache: expectedArticleCache,
+        tags: allTags,
       }));
     });
 
@@ -403,9 +415,11 @@ describe('Code.js', () => {
     it('should return only ids and titles for o=titles from cache, without article bodies', () => {
       const allIds = ['id0', 'id1'];
       const allTitles = { id0: 'Title 0', id1: 'Title 1' };
+      const allTags = { id0: ['運営'], id1: [] };
       mockCache.get.mockImplementation((key) => {
         if (key === '0') return JSON.stringify(allIds);
         if (key === 'titles') return JSON.stringify(allTitles);
+        if (key === 'tags') return JSON.stringify(allTags);
         return null;
       });
       const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
@@ -418,6 +432,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
         ids: allIds,
         titles: allTitles,
+        tags: allTags,
       }));
     });
 
@@ -444,6 +459,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
         ids: ['id1', 'id2'],
         titles: { id1: '2026-01-02 B', id2: '2026-01-01 A' },
+        tags: { id1: [], id2: [] },
       }));
     });
 
@@ -548,7 +564,7 @@ describe('Code.js', () => {
 
     it('should return document from cache if available when ID is specified', () => {
       const docId = 'cachedDocId';
-      const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD' });
+      const cachedPayload = JSON.stringify({ id: docId, title: 'Cached Title', markdown: 'Cached MD', tags: ['運営'] });
       mockCache.get.mockImplementation((key) => {
         if (key === docId) return cachedPayload;
         return null;
@@ -2044,11 +2060,16 @@ describe('Code.js', () => {
     });
 
     it('readDriveArticleCache_ serves a fresh entry and rejects stale or missing ones', () => {
-      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED })));
-      expect(Code.readDriveArticleCache_('doc-x')).toEqual({ id: 'doc-x', title: 'T', markdown: 'MD' });
-      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED - 1 })));
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'], sourceModified: MODIFIED })));
+      expect(Code.readDriveArticleCache_('doc-x')).toEqual({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'] });
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: [], sourceModified: MODIFIED - 1 })));
       expect(Code.readDriveArticleCache_('doc-x')).toBeNull();
       expect(Code.readDriveArticleCache_('missing')).toBeNull();
+    });
+
+    it('readDriveArticleCache_ rejects entries written before article tags existed', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', sourceModified: MODIFIED })));
+      expect(Code.readDriveArticleCache_('doc-x')).toBeNull();
     });
 
     it('preCacheAll stores oversized articles in the Drive cache instead of CacheService', () => {
@@ -2070,6 +2091,257 @@ describe('Code.js', () => {
       Code.preCacheAll();
       expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
       expect(stored.has('large-id.json')).toBe(true);
+    });
+  });
+
+  describe('Article tags', () => {
+    const textEl = (text) => ({
+      getType: () => mockDocumentApp.ElementType.TEXT,
+      asText: () => ({
+        getText: () => text,
+        getTextAttributeIndices: () => [0],
+        getAttributes: () => ({}),
+      }),
+    });
+    const paraEl = (text) => ({
+      getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+      asParagraph: () => ({
+        getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+        getNumChildren: () => 1,
+        getChild: () => textEl(text),
+      }),
+    });
+    const docWithParas = (texts) => ({
+      getName: () => 'Tagged Doc',
+      getBody: () => ({
+        getNumChildren: () => texts.length,
+        getChild: (i) => paraEl(texts[i]),
+      }),
+    });
+    const emptyCacheFolderDrive = () => {
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: vi.fn(() => ({
+          hasNext: () => true,
+          next: () => ({ getFilesByName: vi.fn(() => ({ hasNext: () => false })) }),
+        })),
+        getFilesByType: vi.fn(() => ({ hasNext: () => false })),
+      });
+    };
+
+    describe('parseTagMarker_', () => {
+      it('parses a full-width colon with 、 separators', () => {
+        expect(Code.parseTagMarker_('[[タグ：運営、技術]]')).toEqual(['運営', '技術']);
+      });
+
+      it('parses a half-width colon and comma separators', () => {
+        expect(Code.parseTagMarker_('[[タグ:中国語,音楽]]')).toEqual(['中国語', '音楽']);
+      });
+
+      it('parses ， ／ and / separators and trims spaces', () => {
+        expect(Code.parseTagMarker_('[[タグ： 川口 ， 暮らし ／ 仕事/健康 ]]')).toEqual(['川口', '暮らし', '仕事', '健康']);
+      });
+
+      it('removes duplicate tags', () => {
+        expect(Code.parseTagMarker_('[[タグ：運営、運営]]')).toEqual(['運営']);
+      });
+
+      it('returns an empty array for a marker with no tags', () => {
+        expect(Code.parseTagMarker_('[[タグ：、]]')).toEqual([]);
+      });
+
+      it('returns null for non-marker text', () => {
+        expect(Code.parseTagMarker_('普通の段落です')).toBeNull();
+        expect(Code.parseTagMarker_('[[目次]]')).toBeNull();
+        expect(Code.parseTagMarker_('[[タグ：運営]')).toBeNull();
+        expect(Code.parseTagMarker_('前置き [[タグ：運営]]')).toBeNull();
+        expect(Code.parseTagMarker_(null)).toBeNull();
+        expect(Code.parseTagMarker_(undefined)).toBeNull();
+      });
+    });
+
+    describe('extractDocTags_', () => {
+      it('reads the marker in the first paragraph', () => {
+        expect(Code.extractDocTags_(docWithParas(['[[タグ：運営、技術]]', '本文']))).toEqual(['運営', '技術']);
+      });
+
+      it('finds the marker even when it is not the first paragraph', () => {
+        expect(Code.extractDocTags_(docWithParas(['導入文', '[[タグ：中国語]]', '本文']))).toEqual(['中国語']);
+      });
+
+      it('returns [] when the doc has no marker', () => {
+        expect(Code.extractDocTags_(docWithParas(['ただの本文', 'もう一行']))).toEqual([]);
+      });
+    });
+
+    describe('docBodyToMarkdown_ tag marker removal', () => {
+      beforeEach(() => {
+        mockCache.getAll.mockReturnValue({});
+      });
+
+      it('drops a leading marker paragraph from the markdown', () => {
+        const markdown = Code.docBodyToMarkdown_(docWithParas(['[[タグ：運営、技術]]', '本文です']));
+        expect(markdown).toBe('本文です\n');
+        expect(markdown).not.toContain('タグ');
+      });
+
+      it('drops a marker paragraph in the middle of the doc', () => {
+        const markdown = Code.docBodyToMarkdown_(docWithParas(['一行目', '[[タグ：音楽]]', '二行目']));
+        expect(markdown).toContain('一行目');
+        expect(markdown).toContain('二行目');
+        expect(markdown).not.toContain('タグ');
+      });
+    });
+
+    describe('buildTagsMap_', () => {
+      it('prefers tags from cached article payloads', () => {
+        mockCache.getAll.mockReturnValue({
+          id1: JSON.stringify({ id: 'id1', title: 'T', markdown: 'M', tags: ['運営'] }),
+        });
+        const { tags, complete } = Code.buildTagsMap_(['id1'], mockCache);
+        expect(tags).toEqual({ id1: ['運営'] });
+        expect(complete).toBe(true);
+        expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      });
+
+      it('scans docs for ids with no cached payload', () => {
+        mockCache.getAll.mockReturnValue({});
+        emptyCacheFolderDrive();
+        mockDocumentApp.openById.mockImplementation((id) => docWithParas([`[[タグ：タグ${id}]]`, '本文']));
+        const { tags, complete } = Code.buildTagsMap_(['a', 'b'], mockCache);
+        expect(tags).toEqual({ a: ['タグa'], b: ['タグb'] });
+        expect(complete).toBe(true);
+      });
+
+      it('does not open docs when scanDocs is false and marks the map incomplete', () => {
+        mockCache.getAll.mockReturnValue({});
+        emptyCacheFolderDrive();
+        const { tags, complete } = Code.buildTagsMap_(['a'], mockCache, { scanDocs: false });
+        expect(tags).toEqual({ a: [] });
+        expect(complete).toBe(false);
+        expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('getTagsMap_', () => {
+      it('serves the warmed cache entry and fills missing ids with []', () => {
+        mockCache.get.mockImplementation((key) => (key === 'tags' ? JSON.stringify({ id1: ['運営'] }) : null));
+        expect(Code.getTagsMap_(['id1', 'id2'], mockCache)).toEqual({ id1: ['運営'], id2: [] });
+        expect(mockCache.getAll).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('doGet with tags', () => {
+      const setupFolderFile = () => {
+        const mockParentsIterator = {
+          hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+          next: vi.fn().mockReturnValue({ getId: () => TEST_FOLDER_ID }),
+        };
+        mockDriveApp.getFileById.mockReturnValue({
+          getMimeType: () => mockMimeType.GOOGLE_DOCS,
+          getParents: () => mockParentsIterator,
+          getName: () => 'Tagged Doc',
+          getLastUpdated: () => new Date(1700000000000),
+        });
+      };
+      const parseResponse = () => JSON.parse(mockContentService.createTextOutput.mock.calls[0][0]);
+
+      beforeEach(() => {
+        const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+        mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+      });
+
+      it('includes tags in a freshly generated article response and strips the marker', () => {
+        mockCache.get.mockReturnValue(null);
+        emptyCacheFolderDrive();
+        setupFolderFile();
+        mockDocumentApp.openById.mockReturnValue(docWithParas(['[[タグ：中国語]]', '本文です']));
+
+        Code.doGet({ parameter: { id: 'doc-t' } });
+
+        const response = parseResponse();
+        expect(response.tags).toEqual(['中国語']);
+        expect(response.markdown).toContain('本文です');
+        expect(response.markdown).not.toContain('タグ');
+      });
+
+      it('regenerates when the cached article payload predates tags', () => {
+        const docId = 'legacy-doc';
+        mockCache.get.mockImplementation((key) => (
+          key === docId ? JSON.stringify({ id: docId, title: 'Old', markdown: 'Old MD' }) : null
+        ));
+        emptyCacheFolderDrive();
+        setupFolderFile();
+        mockDocumentApp.openById.mockReturnValue(docWithParas(['[[タグ：運営]]', '新しい本文']));
+
+        Code.doGet({ parameter: { id: docId } });
+
+        const response = parseResponse();
+        expect(response.tags).toEqual(['運営']);
+        expect(response.markdown).toContain('新しい本文');
+      });
+
+      it('includes a complete tags map in the list response, also for articles outside the pre-cached window', () => {
+        mockCache.get.mockReturnValue(null);
+        mockCache.getAll.mockReturnValue({});
+        const total = Code.PRE_CACHE_LIMIT + 2;
+        const mockFiles = [];
+        for (let i = 0; i < total; i++) {
+          mockFiles.push({ getId: () => `id${i}`, getName: () => `2026-01-${String(total - i).padStart(2, '0')} Doc ${i}` });
+        }
+        let index = 0;
+        const mockIterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+        mockDriveApp.getFolderById.mockReturnValue({
+          getFilesByType: vi.fn().mockReturnValue(mockIterator),
+          getFoldersByName: vi.fn(() => ({
+            hasNext: () => true,
+            next: () => ({ getFilesByName: vi.fn(() => ({ hasNext: () => false })) }),
+          })),
+        });
+        setupFolderFile();
+        mockDocumentApp.openById.mockImplementation((id) => docWithParas([`[[タグ：タグ${id}]]`, '本文']));
+
+        Code.doGet({ parameter: {} });
+
+        const response = parseResponse();
+        expect(Object.keys(response.tags)).toHaveLength(total);
+        expect(response.tags.id0).toEqual(['タグid0']);
+        expect(response.tags[`id${total - 1}`]).toEqual([`タグid${total - 1}`]);
+      });
+    });
+
+    describe('preCacheAll tags map', () => {
+      it('saves a complete tags map including docs outside the conversion window', () => {
+        const total = Code.PRE_CACHE_LIMIT + 2;
+        const mockFiles = [];
+        for (let i = 0; i < total; i++) {
+          mockFiles.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
+        }
+        let index = 0;
+        const mockIterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+        mockDriveApp.getFolderById.mockReturnValue({
+          getFilesByType: vi.fn().mockReturnValue(mockIterator),
+          getFoldersByName: vi.fn(() => ({
+            hasNext: () => true,
+            next: () => ({ getFilesByName: vi.fn(() => ({ hasNext: () => false })) }),
+          })),
+        });
+        mockCache.getAll.mockReturnValue({});
+        mockDocumentApp.openById.mockImplementation((id) => docWithParas([`[[タグ：タグ${id}]]`, '本文']));
+
+        Code.preCacheAll();
+
+        const tagsCall = mockCache.put.mock.calls.find((c) => c[0] === 'tags');
+        expect(tagsCall).toBeDefined();
+        const savedTags = JSON.parse(tagsCall[1]);
+        expect(Object.keys(savedTags)).toHaveLength(total);
+        expect(savedTags[`id${total - 1}`]).toEqual([`タグid${total - 1}`]);
+        // The converted articles carry their tags in the payload too
+        const articleCalls = mockCache.put.mock.calls.filter((c) => /^id\d+$/.test(c[0]));
+        expect(articleCalls.length).toBeGreaterThan(0);
+        articleCalls.forEach((c) => {
+          expect(JSON.parse(c[1]).tags).toEqual([`タグ${c[0]}`]);
+        });
+      });
     });
   });
 });

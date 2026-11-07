@@ -14,6 +14,8 @@ paths:
         - If no parameters are provided, returns a list of all document IDs in the folder and preloaded content for the first 10 documents.
         - If an `id` is provided, returns the content of that specific document.
         - If `o=rss` is provided, returns an RSS 2.0 feed of the latest 50 articles.
+        - If `o=titles` is provided, returns only the IDs, titles and tags of all documents.
+        - Articles may carry tags, extracted from a `[[タグ：運営、技術]]` marker paragraph in the Doc (the marker is removed from the markdown).
       parameters:
         - name: id
           in: query
@@ -27,7 +29,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [rss]
+            enum: [rss, titles]
       responses:
         '200':
           description: Successful response. Returns document list, document content, or RSS feed.
@@ -36,6 +38,7 @@ paths:
               schema:
                 oneOf:
                   - $ref: '#/components/schemas/ArticleListResponse'
+                  - $ref: '#/components/schemas/TitlesResponse'
                   - $ref: '#/components/schemas/ArticleResponse'
                   - $ref: '#/components/schemas/ErrorResponse'
             application/xml:
@@ -52,14 +55,48 @@ components:
           description: List of all document IDs in the folder.
           items:
             type: string
+        titles:
+          type: object
+          description: Map of document ID to title, for every listed document.
+          additionalProperties:
+            type: string
         article_cache:
           type: array
           description: Content of the first 10 documents.
           items:
             $ref: '#/components/schemas/Article'
+        tags:
+          $ref: '#/components/schemas/TagMap'
       required:
         - ids
         - article_cache
+        - tags
+    TitlesResponse:
+      type: object
+      properties:
+        ids:
+          type: array
+          description: List of all document IDs in the folder.
+          items:
+            type: string
+        titles:
+          type: object
+          description: Map of document ID to title, for every listed document.
+          additionalProperties:
+            type: string
+        tags:
+          $ref: '#/components/schemas/TagMap'
+      required:
+        - ids
+        - titles
+        - tags
+    TagMap:
+      type: object
+      description: Map of document ID to its tags, for every listed document.
+      additionalProperties:
+        type: array
+        items:
+          type: string
     ArticleResponse:
       $ref: '#/components/schemas/Article'
     Article:
@@ -74,10 +111,16 @@ components:
         markdown:
           type: string
           description: The content of the document converted to Markdown.
+        tags:
+          type: array
+          description: Tags from the Doc's [[タグ：...]] marker paragraph (empty when the Doc has no marker).
+          items:
+            type: string
       required:
         - id
         - title
         - markdown
+        - tags
     ErrorResponse:
       type: object
       properties:

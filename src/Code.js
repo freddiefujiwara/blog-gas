@@ -59,11 +59,13 @@ export const preCacheAll = () => {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
   }
 
+  const convertedTags = {};
   for (const id of targetIds) {
     try {
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
-      const article = { id, title, markdown: docBodyToMarkdown_(doc) };
+      const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+      convertedTags[id] = article.tags;
 
       if (JSON.stringify(article).length < CACHE_SIZE_LIMIT) {
         cache.put(id, JSON.stringify(article), CACHE_TTL);
@@ -78,6 +80,26 @@ export const preCacheAll = () => {
     } catch (e) {
       console.error(`Failed to save ID:${id}: ${e.message}`);
     }
+  }
+
+  // Warm the complete tags map (every article, not only the ones
+  // converted above) so list/titles responses can serve it straight
+  // from CacheService. Converted articles seed the map from the
+  // payloads just built; the rest are resolved from their cached
+  // payloads or a tags-only scan.
+  try {
+    const restIds = allIds.filter((id) => !(id in convertedTags));
+    const { tags: restTags, complete } = buildTagsMap_(restIds, cache, { scanDocs: true });
+    const tags = { ...restTags, ...convertedTags };
+    const tagsPayload = JSON.stringify(tags);
+    if (complete && tagsPayload.length < CACHE_SIZE_LIMIT) {
+      cache.put(TAGS_CACHE_KEY, tagsPayload, CACHE_TTL);
+      console.log('Tags saved');
+    } else if (!complete) {
+      console.error('Tags map incomplete; not saved');
+    }
+  } catch (e) {
+    console.error(`Failed to save tags: ${e.message}`);
   }
 };
 
@@ -214,8 +236,12 @@ export const readDriveArticleCache_ = (docId) => {
     if (!files.hasNext()) return null;
     const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
     const sourceModified = DriveApp.getFileById(docId).getLastUpdated().getTime();
-    if (!data || data.sourceModified !== sourceModified || !data.markdown) return null;
-    return { id: data.id, title: data.title, markdown: data.markdown };
+    // Entries written before article tags existed carry no tags
+    // array; treat them as missing so the article is reconverted
+    // (and the entry rewritten by the next preCacheAll) instead of
+    // serving a payload the API contract no longer matches.
+    if (!data || data.sourceModified !== sourceModified || !data.markdown || !Array.isArray(data.tags)) return null;
+    return { id: data.id, title: data.title, markdown: data.markdown, tags: data.tags };
   } catch (e) {
     log_(`Drive article cache read failed (${docId}): ${e.message}`);
     return null;
@@ -238,6 +264,145 @@ export const writeDriveArticleCache_ = (article) => {
   }
 };
 
+/** -----------------------------
+ *  Article tags: an article Doc carries a marker paragraph such as
+ *  [[タグ：運営、技術]] (usually the first paragraph). Conversion
+ *  extracts the tags into the article payload and drops the marker
+ *  paragraph from the markdown, and the list/titles responses expose
+ *  a complete { articleId: [tags] } map. The map is warmed by
+ *  preCacheAll into CacheService under TAGS_CACHE_KEY, alongside the
+ *  '0' list and 'titles' entries; request handlers only rebuild it
+ *  (without writing it back, like the list itself) when it is cold.
+ *  ----------------------------- */
+export const TAGS_CACHE_KEY = 'tags';
+export const TAGS_RESOLVE_BUDGET_MS = 20000;
+
+/**
+ * Parse a tag marker paragraph's text. Returns the tag array for a
+ * marker (possibly empty), or null when the text is not a marker.
+ * Accepts a full- or half-width colon and 、 ， , ／ / separators.
+ */
+export const parseTagMarker_ = (text) => {
+  if (typeof text !== 'string') return null;
+  const m = text.trim().match(/^\[\[タグ\s*[:：]\s*([^\]]+?)\s*\]\]$/);
+  if (!m) return null;
+  const tags = m[1].split(/[、，,／/]/).map((s) => s.trim()).filter(Boolean);
+  return [...new Set(tags)];
+};
+
+/**
+ * Plain text of a paragraph built from its TEXT children only, or
+ * null when it holds anything else (an inline image, say) — a tag
+ * marker is pure text, so this doubles as a shape check and works
+ * without relying on Paragraph.getText().
+ */
+export const paragraphPlainText_ = (p) => {
+  let text = '';
+  for (let i = 0; i < p.getNumChildren(); i++) {
+    const child = p.getChild(i);
+    if (child.getType() !== DocumentApp.ElementType.TEXT) return null;
+    text += child.asText().getText() || '';
+  }
+  return text;
+};
+
+export const isTagMarkerElement_ = (el) => {
+  try {
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
+    return parseTagMarker_(paragraphPlainText_(el.asParagraph())) !== null;
+  } catch (e) {
+    return false;
+  }
+};
+
+/**
+ * Tags of a Doc: the first tag marker paragraph anywhere in the
+ * body wins; no marker means no tags.
+ */
+export const extractDocTags_ = (doc) => {
+  const body = doc.getBody();
+  for (let i = 0; i < body.getNumChildren(); i++) {
+    const el = body.getChild(i);
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) continue;
+    const tags = parseTagMarker_(paragraphPlainText_(el.asParagraph()));
+    if (tags) return tags;
+  }
+  return [];
+};
+
+/**
+ * Build the { id: [tags] } map for the given ids without ever
+ * converting an article: cached article payloads first, then the
+ * Drive article cache, then (when scanDocs) a tags-only scan that
+ * reads paragraph text but runs no markdown conversion, OG
+ * resolution or image export. The scan shares one time budget
+ * (the same pattern as OG resolution); ids it cannot reach are
+ * mapped to [] and reported via `complete: false` so callers know
+ * the values are not authoritative yet.
+ */
+export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
+  const tags = {};
+  const deadline = Date.now() + TAGS_RESOLVE_BUDGET_MS;
+  const cachedArticles = cache.getAll(ids) || {};
+  const missing = [];
+  ids.forEach((id) => {
+    const raw = cachedArticles[id];
+    if (raw) {
+      try {
+        const article = JSON.parse(raw);
+        if (article && Array.isArray(article.tags)) {
+          tags[id] = article.tags;
+          return;
+        }
+      } catch (e) { /* fall through to the next tier */ }
+    }
+    missing.push(id);
+  });
+  const unscanned = [];
+  missing.forEach((id) => {
+    const driveCached = readDriveArticleCache_(id);
+    if (driveCached && Array.isArray(driveCached.tags)) tags[id] = driveCached.tags;
+    else unscanned.push(id);
+  });
+  let complete = true;
+  unscanned.forEach((id) => {
+    if (!scanDocs || Date.now() > deadline) {
+      complete = false;
+      tags[id] = [];
+      return;
+    }
+    try {
+      tags[id] = extractDocTags_(DocumentApp.openById(id));
+    } catch (e) {
+      log_(`Tags scan failed (${id}): ${e.message}`);
+      complete = false;
+      tags[id] = [];
+    }
+  });
+  return { tags, complete };
+};
+
+/**
+ * The tags map for responses: the preCacheAll-warmed CacheService
+ * entry when present, otherwise a request-time build (never written
+ * back — doGet does not populate the cache, same as the list).
+ * scanDocs=false keeps the lightweight titles variant from opening
+ * any Doc; unresolved ids then map to [] until the warmer runs.
+ */
+export const getTagsMap_ = (ids, cache, options) => {
+  const cached = cache.get(TAGS_CACHE_KEY);
+  if (cached) {
+    try {
+      const parsed = JSON.parse(cached);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        ids.forEach((id) => { if (!Array.isArray(parsed[id])) parsed[id] = []; });
+        return parsed;
+      }
+    } catch (e) { /* rebuild below */ }
+  }
+  return buildTagsMap_(ids, cache, options).tags;
+};
+
 /**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
@@ -255,12 +420,14 @@ export const doGet = (e) => {
     const cachedList = cache.get('0');
     const cachedTitles = cache.get('titles');
     if (cachedList && cachedTitles) {
-      return json_({ ids: JSON.parse(cachedList), titles: JSON.parse(cachedTitles) });
+      const ids = JSON.parse(cachedList);
+      return json_({ ids, titles: JSON.parse(cachedTitles), tags: getTagsMap_(ids, cache, { scanDocs: false }) });
     }
     const docs = listDocsSortedByTitle_(getConfig_().folderId);
     const titles = {};
     docs.forEach((d) => { titles[d.id] = d.title; });
-    return json_({ ids: docs.map((d) => d.id), titles });
+    const ids = docs.map((d) => d.id);
+    return json_({ ids, titles, tags: getTagsMap_(ids, cache, { scanDocs: false }) });
   }
 
   if (!docId) {
@@ -281,6 +448,8 @@ export const doGet = (e) => {
     }
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
+    const tags = getTagsMap_(allIds, cache, { scanDocs: true });
+
     const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
     const cachedArticles = cache.getAll(targetIds);
     const articleCache = targetIds.map((id) => {
@@ -292,7 +461,7 @@ export const doGet = (e) => {
         const info = getDocInfoInFolder_(getConfig_().folderId, id);
         if (info.exists) {
           const doc = DocumentApp.openById(id);
-          return { id, title: info.title, markdown: docBodyToMarkdown_(doc) };
+          return { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
         }
       } catch (err) {
         log_(`Error fetching article ${id}: ${err.message}`);
@@ -300,13 +469,22 @@ export const doGet = (e) => {
       return null;
     }).filter(Boolean);
 
-    return json_({ ids: allIds, titles, article_cache: articleCache });
+    return json_({ ids: allIds, titles, article_cache: articleCache, tags });
   }
 
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
-    log_(`Document (ID:${docId}) retrieved from cache`);
-    return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
+    // Payloads cached before article tags existed carry no tags
+    // array; fall through and regenerate so the response always
+    // matches the current shape (the stale entry expires on its
+    // own within CACHE_TTL).
+    let parsed = null;
+    try { parsed = JSON.parse(cachedDoc); } catch (e) { /* regenerate below */ }
+    if (parsed && Array.isArray(parsed.tags)) {
+      log_(`Document (ID:${docId}) retrieved from cache`);
+      return ContentService.createTextOutput(cachedDoc).setMimeType(ContentService.MimeType.JSON);
+    }
+    log_(`Document (ID:${docId}) cached without tags. Regenerating...`);
   }
 
   const driveCached = readDriveArticleCache_(docId);
@@ -320,7 +498,7 @@ export const doGet = (e) => {
   if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
-  return json_({ id: docId, title: info.title, markdown: docBodyToMarkdown_(doc) });
+  return json_({ id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) });
 };
 
 /** -----------------------------
@@ -795,7 +973,9 @@ export const docBodyToMarkdown_ = (doc) => {
     log_(`OG pre-resolve failed: ${e.message}`);
     ogDataByUrl_ = {};
   }
-  const out = children.map((el) => elementToMarkdown_(el));
+  // Tag marker paragraphs are metadata, not content: they are
+  // extracted via extractDocTags_ and never reach the markdown.
+  const out = children.map((el) => (isTagMarkerElement_(el) ? '' : elementToMarkdown_(el)));
   ogDataByUrl_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
