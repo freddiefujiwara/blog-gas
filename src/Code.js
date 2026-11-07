@@ -94,6 +94,10 @@ export const preCacheAll = () => {
     const tagsPayload = JSON.stringify(tags);
     if (complete && tagsPayload.length < CACHE_SIZE_LIMIT) {
       cache.put(TAGS_CACHE_KEY, tagsPayload, CACHE_TTL);
+      // Persist the same map to Drive: the CacheService copy expires
+      // after CACHE_TTL, and getTagsMap_ falls back to this copy
+      // instead of resolving most ids to no tags in the gap.
+      writeDriveTagsMap_(tags);
       console.log('Tags saved');
     } else if (!complete) {
       console.error('Tags map incomplete; not saved');
@@ -265,6 +269,47 @@ export const writeDriveArticleCache_ = (article) => {
 };
 
 /** -----------------------------
+ *  Drive-backed copy of the complete tags map. The map normally
+ *  lives only in CacheService (TTL CACHE_TTL), and while it is gone
+ *  a titles request resolves most ids to no tags — tag pages then
+ *  lose articles until the next preCacheAll. Keeping the last
+ *  complete map in the article-cache folder lets getTagsMap_ serve
+ *  (and re-warm the cache from) the persistent copy instead. The
+ *  map is small (one entry per article), so a single JSON file in
+ *  the same folder as the article cache is enough; preCacheAll
+ *  rewrites it whenever it rebuilds the map.
+ *  ----------------------------- */
+export const TAGS_FILE_NAME = 'tags.json';
+
+export const readDriveTagsMap_ = () => {
+  try {
+    const files = getArticleCacheFolder_().getFilesByName(TAGS_FILE_NAME);
+    if (!files.hasNext()) return null;
+    const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    return data;
+  } catch (e) {
+    log_(`Drive tags map read failed: ${e.message}`);
+    return null;
+  }
+};
+
+export const writeDriveTagsMap_ = (tags) => {
+  try {
+    const payload = JSON.stringify(tags);
+    const folder = getArticleCacheFolder_();
+    const files = folder.getFilesByName(TAGS_FILE_NAME);
+    if (files.hasNext()) {
+      files.next().setContent(payload);
+    } else {
+      folder.createFile(TAGS_FILE_NAME, payload, MimeType.PLAIN_TEXT);
+    }
+  } catch (e) {
+    log_(`Drive tags map write failed: ${e.message}`);
+  }
+};
+
+/** -----------------------------
  *  Article tags: an article Doc carries a marker paragraph such as
  *  [[タグ：運営、技術]] (usually the first paragraph). Conversion
  *  extracts the tags into the article payload and drops the marker
@@ -384,10 +429,11 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
 
 /**
  * The tags map for responses: the preCacheAll-warmed CacheService
- * entry when present, otherwise a request-time build (never written
- * back — doGet does not populate the cache, same as the list).
- * scanDocs=false keeps the lightweight titles variant from opening
- * any Doc; unresolved ids then map to [] until the warmer runs.
+ * entry when present, otherwise the persistent Drive copy
+ * preCacheAll saved alongside it (which also re-warms the cache),
+ * otherwise a request-time build. scanDocs=false keeps the
+ * lightweight titles variant from opening any Doc; ids no source
+ * can resolve then map to [] until the warmer runs.
  */
 export const getTagsMap_ = (ids, cache, options) => {
   const cached = cache.get(TAGS_CACHE_KEY);
@@ -399,6 +445,20 @@ export const getTagsMap_ = (ids, cache, options) => {
         return parsed;
       }
     } catch (e) { /* rebuild below */ }
+  }
+  // The CacheService copy expires after CACHE_TTL. Before falling
+  // back to a request-time build — which, with scanDocs=false, can
+  // only see cached payloads and resolves most ids to no tags —
+  // serve the persistent copy preCacheAll saved to Drive and
+  // re-warm the cache from it.
+  const persisted = readDriveTagsMap_();
+  if (persisted) {
+    ids.forEach((id) => { if (!Array.isArray(persisted[id])) persisted[id] = []; });
+    try {
+      const payload = JSON.stringify(persisted);
+      if (payload.length < CACHE_SIZE_LIMIT) cache.put(TAGS_CACHE_KEY, payload, CACHE_TTL);
+    } catch (e) { /* serving the map matters more than re-warming */ }
+    return persisted;
   }
   return buildTagsMap_(ids, cache, options).tags;
 };

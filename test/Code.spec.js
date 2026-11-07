@@ -2094,6 +2094,101 @@ describe('Code.js', () => {
     });
   });
 
+  describe('Drive tags map persistence', () => {
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      content,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+      createFile: vi.fn((name, content) => {
+        const f = makeFile(name, content);
+        stored.set(name, f);
+        return f;
+      }),
+    };
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      cacheFolder.createFile.mockClear();
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+        getFilesByType: vi.fn(() => ({ hasNext: () => false })),
+      });
+    });
+
+    it('writeDriveTagsMap_ creates tags.json and overwrites it on the next write', () => {
+      Code.writeDriveTagsMap_({ a: ['運営'] });
+      expect(cacheFolder.createFile).toHaveBeenCalledWith('tags.json', expect.any(String), 'PLAIN_TEXT');
+      expect(JSON.parse(stored.get('tags.json').content)).toEqual({ a: ['運営'] });
+      Code.writeDriveTagsMap_({ a: ['技術'] });
+      expect(cacheFolder.createFile).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(stored.get('tags.json').content)).toEqual({ a: ['技術'] });
+    });
+
+    it('readDriveTagsMap_ returns the stored map and null for missing or malformed files', () => {
+      expect(Code.readDriveTagsMap_()).toBeNull();
+      stored.set('tags.json', makeFile('tags.json', '{not json'));
+      expect(Code.readDriveTagsMap_()).toBeNull();
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify(['運営'])));
+      expect(Code.readDriveTagsMap_()).toBeNull();
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ a: ['運営'], b: [] })));
+      expect(Code.readDriveTagsMap_()).toEqual({ a: ['運営'], b: [] });
+    });
+
+    it('getTagsMap_ serves the Drive copy on a cache miss and re-warms the cache', () => {
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ a: ['運営'] })));
+      mockCache.get.mockReturnValue(null);
+      const result = Code.getTagsMap_(['a', 'b'], mockCache, { scanDocs: false });
+      expect(result).toEqual({ a: ['運営'], b: [] });
+      expect(mockCache.put).toHaveBeenCalledWith('tags', JSON.stringify({ a: ['運営'], b: [] }), Code.CACHE_TTL);
+    });
+
+    it('getTagsMap_ still builds at request time when no Drive copy exists', () => {
+      mockCache.get.mockReturnValue(null);
+      const result = Code.getTagsMap_(['a'], mockCache, { scanDocs: false });
+      expect(result).toEqual({ a: [] });
+    });
+
+    it('preCacheAll persists the completed tags map to Drive', () => {
+      // Earlier error-handling tests leave cache.put with a throwing
+      // implementation (clearAllMocks keeps implementations); the
+      // Drive write happens after the cache put, so restore a plain
+      // put for this test.
+      mockCache.put.mockImplementation(() => {});
+      const mockFiles = [{ getId: () => 'id0', getName: () => 'Doc 0' }];
+      let index = 0;
+      const iterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(iterator),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+      mockDocumentApp.openById.mockImplementation(() => ({
+        getName: () => 'Doc 0',
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => ({
+              getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+              getNumChildren: () => 0,
+            }),
+          }),
+        }),
+      }));
+      Code.preCacheAll();
+      expect(stored.has('tags.json')).toBe(true);
+      expect(JSON.parse(stored.get('tags.json').content)).toEqual({ id0: [] });
+    });
+  });
+
   describe('Article tags', () => {
     const textEl = (text) => ({
       getType: () => mockDocumentApp.ElementType.TEXT,
