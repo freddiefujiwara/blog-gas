@@ -2345,3 +2345,37 @@ describe('Code.js', () => {
     });
   });
 });
+
+describe('Music markers', () => {
+  describe('parseMusicMarker_', () => {
+    it('parses a well-formed marker', () => {
+      expect(Code.parseMusicMarker_('[[music|鳩ヶ谷から浦和まで|1VoWmQ8TSoSPzX_b_PNcsQNypUonoyp7w]]'))
+        .toEqual({ title: '鳩ヶ谷から浦和まで', driveId: '1VoWmQ8TSoSPzX_b_PNcsQNypUonoyp7w' });
+    });
+    it('accepts colons in the title', () => {
+      expect(Code.parseMusicMarker_('[[music|朝5:37 芝川サイクリングロードを走ってみた|1L0FXTEgf_RXmQmKZ0T6S-DEXE1JWQdyh]]'))
+        .toEqual({ title: '朝5:37 芝川サイクリングロードを走ってみた', driveId: '1L0FXTEgf_RXmQmKZ0T6S-DEXE1JWQdyh' });
+    });
+    it('rejects ids with characters outside [A-Za-z0-9_-]', () => {
+      expect(Code.parseMusicMarker_('[[music|曲|abc.def]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[music|曲|abc/def]]')).toBeNull();
+    });
+    it('rejects malformed markers', () => {
+      expect(Code.parseMusicMarker_('[[music|タイトルだけ]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[music||1VoWmQ8TSoSPzX_b_PNcsQNypUonoyp7w]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[music|曲|id]] 追加テキスト')).toBeNull();
+      expect(Code.parseMusicMarker_('ただの文章')).toBeNull();
+      expect(Code.parseMusicMarker_(null)).toBeNull();
+    });
+  });
+  describe('musicTrackMarkdown_', () => {
+    it('builds the placeholder div', () => {
+      expect(Code.musicTrackMarkdown_({ title: '川口の東', driveId: '1DiuhMvUT4pS06O1bfQuiwWHz-i6goMCQ' }))
+        .toBe('<div class="music-track" data-title="川口の東" data-drive-id="1DiuhMvUT4pS06O1bfQuiwWHz-i6goMCQ"></div>');
+    });
+    it('escapes the title for the attribute', () => {
+      expect(Code.musicTrackMarkdown_({ title: 'a"b<c>&', driveId: 'x' }))
+        .toBe('<div class="music-track" data-title="a&quot;b&lt;c&gt;&amp;" data-drive-id="x"></div>');
+    });
+  });
+});

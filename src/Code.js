@@ -389,6 +389,37 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
  * scanDocs=false keeps the lightweight titles variant from opening
  * any Doc; unresolved ids then map to [] until the warmer runs.
  */
+/**
+ * Music player tracks: a paragraph of the exact form
+ * [[music|タイトル|DriveファイルID]] declares one track of the
+ * article's embedded player. Conversion turns each marker into a
+ * placeholder <div class="music-track"> that the front-end collects
+ * (in document order) into a single playlist. Fields are
+ * pipe-separated because titles may contain colons; the Drive file
+ * id is restricted to [A-Za-z0-9_-] so the placeholder is always
+ * safe to build a download URL from.
+ */
+export const parseMusicMarker_ = (text) => {
+  if (typeof text !== 'string') return null;
+  const m = text.trim().match(/^\[\[music\|([^|]+)\|([A-Za-z0-9_-]+)\]\]$/);
+  if (!m) return null;
+  const title = m[1].trim();
+  if (!title) return null;
+  return { title, driveId: m[2] };
+};
+
+export const musicMarkerFromElement_ = (el) => {
+  try {
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return null;
+    return parseMusicMarker_(paragraphPlainText_(el.asParagraph()));
+  } catch (e) {
+    return null;
+  }
+};
+
+export const musicTrackMarkdown_ = (track) =>
+  `<div class="music-track" data-title="${escapeXml_(track.title)}" data-drive-id="${track.driveId}"></div>`;
+
 export const getTagsMap_ = (ids, cache, options) => {
   const cached = cache.get(TAGS_CACHE_KEY);
   if (cached) {
@@ -975,7 +1006,13 @@ export const docBodyToMarkdown_ = (doc) => {
   }
   // Tag marker paragraphs are metadata, not content: they are
   // extracted via extractDocTags_ and never reach the markdown.
-  const out = children.map((el) => (isTagMarkerElement_(el) ? '' : elementToMarkdown_(el)));
+  // Music marker paragraphs become player placeholders instead.
+  const out = children.map((el) => {
+    if (isTagMarkerElement_(el)) return '';
+    const music = musicMarkerFromElement_(el);
+    if (music) return `${musicTrackMarkdown_(music)}\n`;
+    return elementToMarkdown_(el);
+  });
   ogDataByUrl_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
