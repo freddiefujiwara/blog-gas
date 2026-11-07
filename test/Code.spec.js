@@ -2187,6 +2187,40 @@ describe('Code.js', () => {
       expect(stored.has('tags.json')).toBe(true);
       expect(JSON.parse(stored.get('tags.json').content)).toEqual({ id0: [] });
     });
+
+    it('preCacheAll still saves the map when a scan fails, carrying the previous value over', () => {
+      mockCache.put.mockImplementation(() => {});
+      const ids = Array.from({ length: 11 }, (_, i) => `id${i}`);
+      const mockFiles = ids.map((id) => ({ getId: () => id, getName: () => `Doc ${id}` }));
+      let index = 0;
+      const iterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(iterator),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+      mockDocumentApp.openById.mockImplementation((id) => {
+        if (id === 'id10') throw new Error('open failed');
+        return {
+          getName: () => `Doc ${id}`,
+          getBody: () => ({
+            getNumChildren: () => 1,
+            getChild: () => ({
+              getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+              asParagraph: () => ({
+                getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+                getNumChildren: () => 0,
+              }),
+            }),
+          }),
+        };
+      });
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ id10: ['技術'] })));
+      Code.preCacheAll();
+      const saved = JSON.parse(stored.get('tags.json').content);
+      expect(saved.id10).toEqual(['技術']);
+      expect(saved.id0).toEqual([]);
+      expect(mockCache.put).toHaveBeenCalledWith('tags', expect.any(String), Code.CACHE_TTL);
+    });
   });
 
   describe('Article tags', () => {
@@ -2314,6 +2348,15 @@ describe('Code.js', () => {
         expect(tags).toEqual({ a: [] });
         expect(complete).toBe(false);
         expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      });
+
+      it('reports the ids it could not resolve as unresolved', () => {
+        mockCache.getAll.mockReturnValue({});
+        emptyCacheFolderDrive();
+        const { tags, complete, unresolved } = Code.buildTagsMap_(['a'], mockCache, { scanDocs: false });
+        expect(tags).toEqual({ a: [] });
+        expect(complete).toBe(false);
+        expect(unresolved).toEqual(['a']);
       });
     });
 

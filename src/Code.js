@@ -82,25 +82,39 @@ export const preCacheAll = () => {
     }
   }
 
-  // Warm the complete tags map (every article, not only the ones
-  // converted above) so list/titles responses can serve it straight
-  // from CacheService. Converted articles seed the map from the
-  // payloads just built; the rest are resolved from their cached
-  // payloads or a tags-only scan.
+  // Warm the tags map (every article, not only the ones converted
+  // above) so list/titles responses can serve it straight from
+  // CacheService. Converted articles seed the map from the payloads
+  // just built; the rest are resolved from their cached payloads or
+  // a tags-only scan. The scan budget does not always reach every
+  // article (~20 cold Doc opens against a 20s budget), so the map
+  // is saved even then: ids the scan could not reach carry over
+  // their value from the persistent Drive copy instead of making
+  // the whole map unsavable. Ids with no value anywhere start as
+  // [] and are scanned first on the next run.
   try {
+    const previousTags = readDriveTagsMap_() || {};
     const restIds = allIds.filter((id) => !(id in convertedTags));
-    const { tags: restTags, complete } = buildTagsMap_(restIds, cache, { scanDocs: true });
-    const tags = { ...restTags, ...convertedTags };
+    restIds.sort((a, b) => (a in previousTags ? 1 : 0) - (b in previousTags ? 1 : 0));
+    const { tags: restTags, complete, unresolved } = buildTagsMap_(restIds, cache, { scanDocs: true });
+    const unresolvedSet = new Set(unresolved);
+    const tags = {};
+    allIds.forEach((id) => {
+      if (id in convertedTags) tags[id] = convertedTags[id];
+      else if (!unresolvedSet.has(id)) tags[id] = restTags[id];
+      else if (id in previousTags) tags[id] = previousTags[id];
+      else tags[id] = [];
+    });
     const tagsPayload = JSON.stringify(tags);
-    if (complete && tagsPayload.length < CACHE_SIZE_LIMIT) {
+    if (tagsPayload.length < CACHE_SIZE_LIMIT) {
       cache.put(TAGS_CACHE_KEY, tagsPayload, CACHE_TTL);
       // Persist the same map to Drive: the CacheService copy expires
       // after CACHE_TTL, and getTagsMap_ falls back to this copy
       // instead of resolving most ids to no tags in the gap.
       writeDriveTagsMap_(tags);
-      console.log('Tags saved');
-    } else if (!complete) {
-      console.error('Tags map incomplete; not saved');
+      console.log(complete ? 'Tags saved' : `Tags saved (partial: ${unresolved.length} carried over)`);
+    } else {
+      console.error('Tags map too large; not saved');
     }
   } catch (e) {
     console.error(`Failed to save tags: ${e.message}`);
@@ -382,8 +396,9 @@ export const extractDocTags_ = (doc) => {
  * reads paragraph text but runs no markdown conversion, OG
  * resolution or image export. The scan shares one time budget
  * (the same pattern as OG resolution); ids it cannot reach are
- * mapped to [] and reported via `complete: false` so callers know
- * the values are not authoritative yet.
+ * mapped to [] and reported via `complete: false` plus the
+ * `unresolved` id list, so callers can carry those ids over from
+ * an older map instead of treating the [] as authoritative.
  */
 export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
   const tags = {};
@@ -410,9 +425,11 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
     else unscanned.push(id);
   });
   let complete = true;
+  const unresolved = [];
   unscanned.forEach((id) => {
     if (!scanDocs || Date.now() > deadline) {
       complete = false;
+      unresolved.push(id);
       tags[id] = [];
       return;
     }
@@ -421,10 +438,11 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
     } catch (e) {
       log_(`Tags scan failed (${id}): ${e.message}`);
       complete = false;
+      unresolved.push(id);
       tags[id] = [];
     }
   });
-  return { tags, complete };
+  return { tags, complete, unresolved };
 };
 
 /**
