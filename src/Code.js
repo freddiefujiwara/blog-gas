@@ -391,21 +391,25 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
  */
 /**
  * Music player tracks: a paragraph of the exact form
- * [[music|タイトル|DriveファイルID]] declares one track of the
+ * [[music|タイトル|音源ファイル名.mp3]] declares one track of the
  * article's embedded player. Conversion turns each marker into a
  * placeholder <div class="music-track"> that the front-end collects
  * (in document order) into a single playlist. Fields are
- * pipe-separated because titles may contain colons; the Drive file
- * id is restricted to [A-Za-z0-9_-] so the placeholder is always
- * safe to build a download URL from.
+ * pipe-separated because titles may contain colons. The audio file
+ * itself is served by the blog (public/audio/), so the third field
+ * is a plain file name restricted to [A-Za-z0-9_-] plus the .mp3
+ * suffix — no directories, so it can never point outside /audio/.
+ * (Drive direct-download links are not usable here: they answer
+ * with Content-Disposition: attachment, which browsers refuse to
+ * play in an <audio> element.)
  */
 export const parseMusicMarker_ = (text) => {
   if (typeof text !== 'string') return null;
-  const m = text.trim().match(/^\[\[music\|([^|]+)\|([A-Za-z0-9_-]+)\]\]$/);
+  const m = text.trim().match(/^\[\[music\|([^|]+)\|([A-Za-z0-9_-]+\.mp3)\]\]$/);
   if (!m) return null;
   const title = m[1].trim();
   if (!title) return null;
-  return { title, driveId: m[2] };
+  return { title, file: m[2] };
 };
 
 export const musicMarkerFromElement_ = (el) => {
@@ -418,7 +422,7 @@ export const musicMarkerFromElement_ = (el) => {
 };
 
 export const musicTrackMarkdown_ = (track) =>
-  `<div class="music-track" data-title="${escapeXml_(track.title)}" data-drive-id="${track.driveId}"></div>`;
+  `<div class="music-track" data-title="${escapeXml_(track.title)}" data-file="${track.file}"></div>`;
 
 export const getTagsMap_ = (ids, cache, options) => {
   const cached = cache.get(TAGS_CACHE_KEY);
