@@ -90,12 +90,15 @@ export const preCacheAll = () => {
   // article (~20 cold Doc opens against a 20s budget), so the map
   // is saved even then: ids the scan could not reach carry over
   // their value from the persistent Drive copy instead of making
-  // the whole map unsavable. Ids with no value anywhere start as
-  // [] and are scanned first on the next run.
+  // the whole map unsavable. Ids whose saved value is missing or
+  // empty are scanned first on the next run, so repeated runs
+  // converge to a fully resolved map instead of starving the
+  // same tail every time.
   try {
     const previousTags = readDriveTagsMap_() || {};
     const restIds = allIds.filter((id) => !(id in convertedTags));
-    restIds.sort((a, b) => (a in previousTags ? 1 : 0) - (b in previousTags ? 1 : 0));
+    const needsScan = (id) => !(Array.isArray(previousTags[id]) && previousTags[id].length);
+    restIds.sort((a, b) => (needsScan(a) ? 0 : 1) - (needsScan(b) ? 0 : 1));
     const { tags: restTags, complete, unresolved } = buildTagsMap_(restIds, cache, { scanDocs: true });
     const unresolvedSet = new Set(unresolved);
     const tags = {};

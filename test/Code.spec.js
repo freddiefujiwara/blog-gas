@@ -2221,6 +2221,53 @@ describe('Code.js', () => {
       expect(saved.id0).toEqual([]);
       expect(mockCache.put).toHaveBeenCalledWith('tags', expect.any(String), Code.CACHE_TTL);
     });
+
+    it('preCacheAll re-scans an article whose saved value is empty instead of carrying [] over', () => {
+      mockCache.put.mockImplementation(() => {});
+      const ids = Array.from({ length: 11 }, (_, i) => `id${i}`);
+      const mockFiles = ids.map((id) => ({ getId: () => id, getName: () => `Doc ${id}` }));
+      let index = 0;
+      const iterator = { hasNext: () => index < mockFiles.length, next: () => mockFiles[index++] };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn().mockReturnValue(iterator),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+      const markerPara = {
+        getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+        asParagraph: () => ({
+          getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.TEXT,
+            asText: () => ({ getText: () => '[[タグ：技術]]' }),
+          }),
+        }),
+      };
+      const plainDoc = (id) => ({
+        getName: () => `Doc ${id}`,
+        getBody: () => ({
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => ({
+              getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+              getNumChildren: () => 0,
+            }),
+          }),
+        }),
+      });
+      mockDocumentApp.openById.mockImplementation((id) => {
+        if (id !== 'id10') return plainDoc(id);
+        return {
+          getName: () => 'Doc id10',
+          getBody: () => ({ getNumChildren: () => 1, getChild: () => markerPara }),
+        };
+      });
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ id10: [] })));
+      Code.preCacheAll();
+      const saved = JSON.parse(stored.get('tags.json').content);
+      expect(saved.id10).toEqual(['技術']);
+    });
   });
 
   describe('Article tags', () => {
