@@ -2534,29 +2534,26 @@ describe('Code.js', () => {
 describe('Music markers', () => {
   describe('parseMusicMarker_', () => {
     it('parses a well-formed marker', () => {
-      expect(Code.parseMusicMarker_('[[music|鳩ヶ谷から浦和まで|hatogaya-urawa.mp3]]'))
+      expect(Code.parseMusicMarker_('[[音楽|鳩ヶ谷から浦和まで|hatogaya-urawa.mp3]]'))
         .toEqual({ title: '鳩ヶ谷から浦和まで', file: 'hatogaya-urawa.mp3' });
     });
     it('accepts colons in the title', () => {
-      expect(Code.parseMusicMarker_('[[music|朝5:37 芝川サイクリングロードを走ってみた|shibakawa-cycling-road.mp3]]'))
+      expect(Code.parseMusicMarker_('[[音楽|朝5:37 芝川サイクリングロードを走ってみた|shibakawa-cycling-road.mp3]]'))
         .toEqual({ title: '朝5:37 芝川サイクリングロードを走ってみた', file: 'shibakawa-cycling-road.mp3' });
     });
-    it('parses the Japanese [[音楽|...]] form the same way', () => {
-      expect(Code.parseMusicMarker_('[[音楽|鳩ヶ谷から浦和まで|hatogaya-urawa.mp3]]'))
-        .toEqual({ title: '鳩ヶ谷から浦和まで', file: 'hatogaya-urawa.mp3' });
-      expect(Code.parseMusicMarker_('[[音楽|曲|abc.wav]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[音楽|タイトルだけ]]')).toBeNull();
+    it('rejects the old [[music|...]] form', () => {
+      expect(Code.parseMusicMarker_('[[music|鳩ヶ谷から浦和まで|hatogaya-urawa.mp3]]')).toBeNull();
     });
     it('rejects non-mp3 names and paths', () => {
-      expect(Code.parseMusicMarker_('[[music|曲|abc.wav]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[music|曲|a/b.mp3]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[music|曲|../x.mp3]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[music|曲|1VoWmQ8TSoSPzX_b_PNcsQNypUonoyp7w]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|曲|abc.wav]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|曲|a/b.mp3]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|曲|../x.mp3]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|曲|1VoWmQ8TSoSPzX_b_PNcsQNypUonoyp7w]]')).toBeNull();
     });
     it('rejects malformed markers', () => {
-      expect(Code.parseMusicMarker_('[[music|タイトルだけ]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[music||hatogaya-urawa.mp3]]')).toBeNull();
-      expect(Code.parseMusicMarker_('[[music|曲|x.mp3]] 追加テキスト')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|タイトルだけ]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽||hatogaya-urawa.mp3]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|曲|x.mp3]] 追加テキスト')).toBeNull();
       expect(Code.parseMusicMarker_('ただの文章')).toBeNull();
       expect(Code.parseMusicMarker_(null)).toBeNull();
     });
