@@ -2541,6 +2541,12 @@ describe('Music markers', () => {
       expect(Code.parseMusicMarker_('[[music|朝5:37 芝川サイクリングロードを走ってみた|shibakawa-cycling-road.mp3]]'))
         .toEqual({ title: '朝5:37 芝川サイクリングロードを走ってみた', file: 'shibakawa-cycling-road.mp3' });
     });
+    it('parses the Japanese [[音楽|...]] form the same way', () => {
+      expect(Code.parseMusicMarker_('[[音楽|鳩ヶ谷から浦和まで|hatogaya-urawa.mp3]]'))
+        .toEqual({ title: '鳩ヶ谷から浦和まで', file: 'hatogaya-urawa.mp3' });
+      expect(Code.parseMusicMarker_('[[音楽|曲|abc.wav]]')).toBeNull();
+      expect(Code.parseMusicMarker_('[[音楽|タイトルだけ]]')).toBeNull();
+    });
     it('rejects non-mp3 names and paths', () => {
       expect(Code.parseMusicMarker_('[[music|曲|abc.wav]]')).toBeNull();
       expect(Code.parseMusicMarker_('[[music|曲|a/b.mp3]]')).toBeNull();
