@@ -459,7 +459,10 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
 /**
  * Music player tracks: a paragraph of the exact form
  * [[music|タイトル|音源ファイル名.mp3]] declares one track of the
- * article's embedded player. Conversion turns each marker into a
+ * article's embedded player. The Japanese form
+ * [[音楽|タイトル|音源ファイル名.mp3]] is accepted as well (the
+ * markers are Japanese-first; "music" remains for compatibility).
+ * Conversion turns each marker into a
  * placeholder <div class="music-track"> that the front-end collects
  * (in document order) into a single playlist. Fields are
  * pipe-separated because titles may contain colons. The audio file
@@ -472,7 +475,7 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
  */
 export const parseMusicMarker_ = (text) => {
   if (typeof text !== 'string') return null;
-  const m = text.trim().match(/^\[\[music\|([^|]+)\|([A-Za-z0-9_-]+\.mp3)\]\]$/);
+  const m = text.trim().match(/^\[\[(?:music|音楽)\|([^|]+)\|([A-Za-z0-9_-]+\.mp3)\]\]$/);
   if (!m) return null;
   const title = m[1].trim();
   if (!title) return null;
