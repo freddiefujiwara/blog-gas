@@ -2020,37 +2020,47 @@ describe('Code.js', () => {
         });
       };
 
-      it('marks the card as cancelled when the previous paragraph notes a cancellation', () => {
+      it('grays out the card when a [[画像グレーアウト]] marker precedes the link', () => {
         cachedOg();
         const doc = docWithChildren([
-          linkPara([textChild('中国語学習のために使っているサービスです（解約手続き済みで、2027年9月26日まで利用できます）')]),
+          linkPara([textChild('[[画像グレーアウト]]')]),
           linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
         ]);
         const markdown = Code.docBodyToMarkdown_(doc);
-        expect(markdown).toContain('class="link-card is-cancelled"');
+        expect(markdown).toContain('class="link-card is-grayout"');
+        expect(markdown).not.toContain('画像グレーアウト');
       });
 
-      it('does not mark the card when the previous paragraph has no cancellation note', () => {
+      it('does not gray out the card without the marker', () => {
         cachedOg();
         const doc = docWithChildren([
-          linkPara([textChild('中国語学習のために使っているサービスです')]),
-          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
-        ]);
-        const markdown = Code.docBodyToMarkdown_(doc);
-        expect(markdown).toContain('class="link-card"');
-        expect(markdown).not.toContain('is-cancelled');
-      });
-
-      it('does not mark the card when the cancellation note is not in the immediately previous paragraph', () => {
-        cachedOg();
-        const doc = docWithChildren([
-          linkPara([textChild('解約手続き済みのサービスです')]),
           linkPara([textChild('ただの本文です')]),
           linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
         ]);
         const markdown = Code.docBodyToMarkdown_(doc);
         expect(markdown).toContain('class="link-card"');
-        expect(markdown).not.toContain('is-cancelled');
+        expect(markdown).not.toContain('is-grayout');
+      });
+
+      it('does not gray out the card when the marker is not immediately before the link', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('[[画像グレーアウト]]')]),
+          linkPara([textChild('ただの本文です')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-grayout');
+        expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      it('parses the grayout marker strictly', () => {
+        expect(Code.parseGrayoutMarker_('[[画像グレーアウト]]')).toBe(true);
+        expect(Code.parseGrayoutMarker_(' [[画像グレーアウト]] ')).toBe(true);
+        expect(Code.parseGrayoutMarker_('[[画像グレーアウト]]です')).toBeNull();
+        expect(Code.parseGrayoutMarker_('画像グレーアウト')).toBeNull();
+        expect(Code.parseGrayoutMarker_(null)).toBeNull();
       });
 
       it('keeps a plain link when no OG data is available', () => {

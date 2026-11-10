@@ -722,11 +722,11 @@ export const ZE_OGP_MAX_URL_LENGTH = 1024;
 // OG data for the document currently being converted (per execution).
 let ogDataByUrl_ = {};
 
-// URLs whose link card belongs to a cancelled entry: in the
-// list-of-stuff article, a subscription marked as cancelled carries
-// the note in the paragraph right before its link, and the card for
-// such a URL gets an extra class so front-ends can gray it out.
-let cancelledCardUrls_ = {};
+// URLs whose link card the author wants grayed out: a
+// [[画像グレーアウト]] marker paragraph right before the link
+// paragraph flags that card, and front-ends gray it out via CSS.
+// Any article can use the marker; generators may emit it too.
+let grayoutCardUrls_ = {};
 
 export const ogCacheKey_ = (url) => {
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
@@ -1223,13 +1223,21 @@ export const resolveRoomOgData_ = (urls) => {
   }
 };
 
-// A link card counts as cancelled when the paragraph right before
-// the link paragraph says the entry was cancelled (解約). The
-// generated list-of-stuff article puts the subscription's purpose
-// (including the cancellation note) in exactly that position.
-export const isCancelledCardContext_ = (prevEl) => {
-  if (!prevEl || prevEl.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
-  return (paragraphPlainText_(prevEl.asParagraph()) || '').includes('解約');
+// A [[画像グレーアウト]] marker paragraph flags the link card
+// that follows it for graying out. Like the tag and music markers,
+// the marker itself never reaches the markdown.
+export const parseGrayoutMarker_ = (text) => {
+  if (typeof text !== 'string') return null;
+  return /^\[\[\s*画像グレーアウト\s*\]\]$/.test(text.trim()) ? true : null;
+};
+
+export const isGrayoutMarkerElement_ = (el) => {
+  try {
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
+    return parseGrayoutMarker_(paragraphPlainText_(el.asParagraph())) !== null;
+  } catch (e) {
+    return false;
+  }
 };
 
 export const linkCardMarkdown_ = (url, og) => {
@@ -1239,7 +1247,7 @@ export const linkCardMarkdown_ = (url, og) => {
   const desc = og.description ? `<span class="link-card-description">${escapeXml_(og.description)}</span>` : '';
   const domainMatch = String(url).match(/^https?:\/\/([^/]+)/);
   const domain = domainMatch ? domainMatch[1] : '';
-  const cardClass = cancelledCardUrls_[url] ? 'link-card is-cancelled' : 'link-card';
+  const cardClass = grayoutCardUrls_[url] ? 'link-card is-grayout' : 'link-card';
   return `<a class="${cardClass}" href="${escapeXml_(url)}" target="_blank" rel="noopener noreferrer">${img}<span class="link-card-body"><span class="link-card-title">${escapeXml_(title)}</span>${desc}<span class="link-card-domain">${escapeXml_(domain)}</span></span></a>\n`;
 };
 
@@ -1250,15 +1258,19 @@ export const docBodyToMarkdown_ = (doc) => {
   const body = doc.getBody();
   const children = Array.from({ length: body.getNumChildren() }, (_, i) => body.getChild(i));
   ogDataByUrl_ = {};
-  cancelledCardUrls_ = {};
+  grayoutCardUrls_ = {};
   try {
     const urls = [];
     children.forEach((el, idx) => {
       if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
         const url = standaloneLinkUrl_(el.asParagraph());
         if (url && !urls.includes(url)) urls.push(url);
-        if (url && idx > 0 && isCancelledCardContext_(children[idx - 1])) {
-          cancelledCardUrls_[url] = true;
+      }
+      if (isGrayoutMarkerElement_(el) && idx + 1 < children.length) {
+        const next = children[idx + 1];
+        if (next.getType() === DocumentApp.ElementType.PARAGRAPH) {
+          const nextUrl = standaloneLinkUrl_(next.asParagraph());
+          if (nextUrl) grayoutCardUrls_[nextUrl] = true;
         }
       }
     });
@@ -1269,19 +1281,21 @@ export const docBodyToMarkdown_ = (doc) => {
   } catch (e) {
     log_(`OG pre-resolve failed: ${e.message}`);
     ogDataByUrl_ = {};
-    cancelledCardUrls_ = {};
+    grayoutCardUrls_ = {};
   }
   // Tag marker paragraphs are metadata, not content: they are
   // extracted via extractDocTags_ and never reach the markdown.
-  // Music marker paragraphs become player placeholders instead.
+  // Music marker paragraphs become player placeholders instead, and
+  // grayout markers only flag the card that follows them.
   const out = children.map((el) => {
     if (isTagMarkerElement_(el)) return '';
+    if (isGrayoutMarkerElement_(el)) return '';
     const music = musicMarkerFromElement_(el);
     if (music) return `${musicTrackMarkdown_(music)}\n`;
     return elementToMarkdown_(el);
   });
   ogDataByUrl_ = {};
-  cancelledCardUrls_ = {};
+  grayoutCardUrls_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
 
