@@ -1689,6 +1689,193 @@ describe('Code.js', () => {
       });
     });
 
+    describe('zeOgEntryToData_', () => {
+      it('maps an ok entry to OG data', () => {
+        expect(Code.zeOgEntryToData_({
+          status: 'ok', title: 'ZE Title', description: 'ZE desc', image: 'https://example.com/ze.jpg',
+        })).toEqual({
+          title: 'ZE Title',
+          image: 'https://example.com/ze.jpg',
+          description: 'ZE desc',
+        });
+      });
+
+      it('truncates the description to OG_DESCRIPTION_LIMIT', () => {
+        const data = Code.zeOgEntryToData_({ status: 'ok', title: 'T', description: 'a'.repeat(200), image: null });
+        expect(data.title).toBe('T');
+        expect(data.image).toBe('');
+        expect(data.description).toHaveLength(Code.OG_DESCRIPTION_LIMIT);
+      });
+
+      it('returns null for error entries, missing entries, or unusable data', () => {
+        expect(Code.zeOgEntryToData_({ status: 'error', error: 'http_403' })).toBeNull();
+        expect(Code.zeOgEntryToData_({ status: 'no_ogp', title: 'T' })).toBeNull();
+        expect(Code.zeOgEntryToData_(null)).toBeNull();
+        expect(Code.zeOgEntryToData_({ status: 'ok', title: '', description: 'desc only', image: null })).toBeNull();
+      });
+    });
+
+    describe('syncOgpCache_', () => {
+      let store;
+      beforeEach(() => {
+        store = new Map();
+        mockCache.get.mockImplementation((key) => store.get(key));
+        mockCache.put.mockImplementation((key, value) => store.set(key, value));
+        mockCache.getAll.mockImplementation((keys) => {
+          const out = {};
+          keys.forEach((k) => { if (store.has(k)) out[k] = store.get(k); });
+          return out;
+        });
+      });
+
+      it('imports ok entries into the OG cache and skips the rest', () => {
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            version: 1,
+            entries: {
+              [URL_A]: { status: 'ok', title: 'ZE Title', description: 'ZE desc', image: 'https://example.com/ze.jpg' },
+              'https://example.com/err': { status: 'error', error: 'http_403' },
+            },
+          }),
+        });
+        const imported = Code.syncOgpCache_(mockCache, true);
+        expect(imported).toBe(1);
+        expect(JSON.parse(store.get(Code.ogCacheKey_(URL_A)))).toEqual({
+          title: 'ZE Title', image: 'https://example.com/ze.jpg', description: 'ZE desc',
+        });
+        const [reqUrl] = mockUrlFetchApp.fetch.mock.calls[0];
+        expect(reqUrl).toBe(Code.ZE_OGP_CACHE_URL);
+      });
+
+      it('does not overwrite an entry the local cache already holds', () => {
+        store.set(Code.ogCacheKey_(URL_A), JSON.stringify({ title: 'Local', image: '', description: '' }));
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            entries: { [URL_A]: { status: 'ok', title: 'ZE Title', image: 'x', description: '' } },
+          }),
+        });
+        expect(Code.syncOgpCache_(mockCache, true)).toBe(0);
+        expect(JSON.parse(store.get(Code.ogCacheKey_(URL_A))).title).toBe('Local');
+      });
+
+      it('is throttled by the sync marker unless forced', () => {
+        store.set(Code.ZE_OGP_SYNC_KEY, String(Date.now()));
+        mockUrlFetchApp.fetch.mockReturnValue({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ entries: {} }),
+        });
+        expect(Code.syncOgpCache_(mockCache, false)).toBe(0);
+        expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+        Code.syncOgpCache_(mockCache, true);
+        expect(mockUrlFetchApp.fetch).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('resolveOgData_ ze final tier', () => {
+      const ZE_OK_ENTRY = { status: 'ok', title: 'ZE Title', description: 'ZE desc', image: 'https://example.com/ze.jpg' };
+      const withToken = () => mockProperties.getProperty.mockImplementation(
+        (key) => (key === 'HOME_API_TOKEN' ? 'test-token' : (TEST_CONFIG[key] ?? null)));
+      const blocked = (requests) => requests.map(() => ({
+        getResponseCode: () => 403,
+        getContentText: () => 'forbidden',
+      }));
+      let store;
+
+      beforeEach(() => {
+        store = new Map();
+        mockCache.get.mockImplementation((key) => store.get(key));
+        mockCache.put.mockImplementation((key, value) => store.set(key, value));
+        mockCache.getAll.mockImplementation((keys) => {
+          const out = {};
+          keys.forEach((k) => { if (store.has(k)) out[k] = store.get(k); });
+          return out;
+        });
+        mockUrlFetchApp.fetchAll.mockReset();
+        mockUrlFetchApp.fetch.mockReset();
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 403,
+          getContentText: () => 'forbidden',
+        }]);
+        // Default ze state: cache JSON is empty; requests succeed silently.
+        mockUrlFetchApp.fetch.mockImplementation((url) => {
+          if (url === Code.ZE_OGP_CACHE_URL) {
+            return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ version: 1, entries: {} }) };
+          }
+          return { getResponseCode: () => 200, getContentText: () => '' };
+        });
+      });
+
+      const zeJsonWith = (entries) => (url) => {
+        if (url === Code.ZE_OGP_CACHE_URL) {
+          return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ version: 1, entries }) };
+        }
+        return { getResponseCode: () => 200, getContentText: () => '' };
+      };
+      const requestCalls = () => mockUrlFetchApp.fetch.mock.calls
+        .filter(([url]) => String(url).startsWith(Code.ZE_OGP_REQUEST_BASE + '/'));
+
+      it('resolves a blocked URL from the imported ze entry, without requesting it', () => {
+        mockUrlFetchApp.fetch.mockImplementation(zeJsonWith({ [URL_A]: ZE_OK_ENTRY }));
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toEqual({
+          title: 'ZE Title',
+          image: 'https://example.com/ze.jpg',
+          description: 'ZE desc',
+        });
+        expect(requestCalls()).toHaveLength(0);
+        expect(JSON.parse(store.get(Code.ogCacheKey_(URL_A))).title).toBe('ZE Title');
+      });
+
+      it('requests the URL from ze when ze has no entry yet, and failure-caches it for now', () => {
+        withToken();
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toBeUndefined();
+        expect(requestCalls()).toHaveLength(1);
+        const [reqUrl, reqOpts] = requestCalls()[0];
+        expect(reqUrl).toBe(`${Code.ZE_OGP_REQUEST_BASE}/${encodeURIComponent(URL_A)}`);
+        expect(reqOpts.headers['X-Api-Token']).toBe('test-token');
+        expect(store.get(Code.ogCacheKey_(URL_A))).toBe(JSON.stringify({}));
+      });
+
+      it('does not request when HOME_API_TOKEN is not set', () => {
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toBeUndefined();
+        expect(requestCalls()).toHaveLength(0);
+        expect(store.get(Code.ogCacheKey_(URL_A))).toBe(JSON.stringify({}));
+      });
+
+      it('does not resolve from an error entry, but still requests a refetch', () => {
+        withToken();
+        mockUrlFetchApp.fetch.mockImplementation(zeJsonWith({ [URL_A]: { status: 'error', error: 'http_403' } }));
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A]).toBeUndefined();
+        expect(requestCalls()).toHaveLength(1);
+      });
+
+      it('does not touch ze for URLs the direct fetch resolved', () => {
+        withToken();
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getContentText: () => ogHtml(),
+        }]);
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A].title).toBe('Example Title');
+        expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
+      });
+
+      it('caps ze requests per run', () => {
+        withToken();
+        mockUrlFetchApp.fetchAll.mockImplementation(blocked);
+        const urls = Array.from(
+          { length: Code.ZE_OGP_MAX_PER_RUN + 2 },
+          (_, i) => `https://example.com/blocked-${i}`);
+        Code.resolveOgData_(urls);
+        expect(requestCalls()).toHaveLength(Code.ZE_OGP_MAX_PER_RUN);
+      });
+    });
+
     describe('linkCardMarkdown_', () => {
       it('renders a full card', () => {
         const html = Code.linkCardMarkdown_(URL_A, { title: 'T', image: 'https://example.com/i.jpg', description: 'D' });
