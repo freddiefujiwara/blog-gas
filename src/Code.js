@@ -708,6 +708,12 @@ export const OG_SCAN_LIMIT = 200000;
 export const OG_FETCH_BATCH_SIZE = 20;
 export const OG_RESOLVE_BUDGET_MS = 40000;
 export const OGP_API_CHUNK_CHARS = 1600;
+export const ZE_OGP_REQUEST_BASE = 'https://a.ze.gs/ogp';
+export const ZE_OGP_CACHE_URL = 'https://a.ze.gs/ogp-cache.json';
+export const ZE_OGP_MAX_PER_RUN = 3;
+export const ZE_OGP_SYNC_TTL = 600;
+export const ZE_OGP_SYNC_KEY = 'og:ze:sync:v1';
+export const ZE_OGP_MAX_URL_LENGTH = 1024;
 
 // OG data for the document currently being converted (per execution).
 let ogDataByUrl_ = {};
@@ -843,20 +849,23 @@ export const resolveOgData_ = (urls) => {
     } catch (e) {
       log_(`OG API lookup failed: ${e.message}`);
     }
+    // URLs no tier has resolved yet. Whatever is left at the end is
+    // failure-cached briefly, exactly as before; the ze final
+    // tier below gets its chance first.
+    const unresolved = new Set(misses);
     if (apiData) {
       misses.forEach((url) => {
         const d = apiData[url];
         if (d && (d.title || d.image)) {
           result[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
           try { cache.put(ogCacheKey_(url), JSON.stringify(result[url]), OG_CACHE_TTL); } catch (e) { /* ignore */ }
-        } else {
-          // The API answered but has no data for this URL: remember
-          // briefly instead of refetching the origin directly.
-          try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
+          unresolved.delete(url);
         }
+        // The API answered but has no data for this URL: do not refetch
+        // the origin directly (that is what the API tier is for); the
+        // URL stays unresolved for the final tier.
       });
-      return result;
-    }
+    } else {
 
     // Fetch in batches with an overall time budget. A single fetchAll
     // over every miss makes the whole conversion hostage to the slowest
@@ -872,11 +881,11 @@ export const resolveOgData_ = (urls) => {
       if (data && (data.title || data.image)) {
         result[url] = data;
         try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
-      } else {
-        // No usable OG data (or the fetch failed / was skipped): remember
-        // briefly so repeated conversions do not refetch right away.
-        try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
+        unresolved.delete(url);
       }
+      // No usable OG data (or the fetch failed / was skipped): the URL
+      // stays unresolved; the final tier runs next, and whatever is
+      // still left afterwards is failure-cached there.
     };
     for (let b = 0; b < misses.length; b += OG_FETCH_BATCH_SIZE) {
       const batch = misses.slice(b, b + OG_FETCH_BATCH_SIZE);
@@ -927,6 +936,21 @@ export const resolveOgData_ = (urls) => {
         storeResult_(url, data);
       });
     }
+    }
+
+    // Final tier: the home server (ze), for the URLs no other tier
+    // could resolve (sites that reject the direct fetch and the shared
+    // OGP API, e.g. tabelog). Asynchronous by design: results the ze
+    // batch already fetched are imported from its published cache
+    // JSON, and URLs it has not fetched yet are only *requested* —
+    // this conversion keeps the plain link, a later one gets the
+    // card. Whatever is still unresolved is failure-cached briefly,
+    // so repeated conversions do not re-request right away.
+    const stillUnresolved = resolveOgViaZe_(
+      misses.filter((url) => unresolved.has(url)), result, cache);
+    stillUnresolved.forEach((url) => {
+      try { cache.put(ogCacheKey_(url), JSON.stringify({}), OG_FAILURE_CACHE_TTL); } catch (e) { /* ignore */ }
+    });
     return result;
   } catch (e) {
     log_(`OG resolve failed: ${e.message}`);
@@ -978,6 +1002,127 @@ export const fetchOgDataFromApi_ = (urls) => {
     Object.assign(result, (parsed && parsed.results) || {});
   });
   return result;
+};
+
+/** -----------------------------
+ *  Home server (ze) OG tier (final tier): some sites reject both
+ *  the direct UrlFetch and the shared OGP API (tabelog is the known
+ *  case), but the home server can fetch them from its residential
+ *  IP. The flow is asynchronous, built on altd: a GET to
+ *  https://a.ze.gs/ogp/<encodeURIComponent(url)> (X-Api-Token gate,
+ *  token in the HOME_API_TOKEN script property) only *queues* the
+ *  URL; a batch on ze fetches it within minutes and publishes all
+ *  results as one JSON file (ogp-cache.json, no auth — it holds
+ *  only public pages' OG data). This tier therefore (1) imports
+ *  whatever ze already knows into the local OG cache, and
+ *  (2) queues requests for the rest, capped per run. A URL cards
+ *  from the next conversion after ze fetched it; the blog's daily
+ *  cycle makes that delay harmless.
+ *  ----------------------------- */
+export const zeOgEntryToData_ = (entry) => {
+  if (!entry || entry.status !== 'ok') return null;
+  const title = entry.title || '';
+  const image = entry.image || '';
+  const description = String(entry.description || '').slice(0, OG_DESCRIPTION_LIMIT);
+  if (!title && !image) return null;
+  return { title, image, description };
+};
+
+/**
+ * Import ze's published OG cache into the local OG cache. Runs at
+ * most once per ZE_OGP_SYNC_TTL seconds (throttled through the
+ * cache itself) unless `force` is set. Entries already present in
+ * the local cache are left alone — a locally fresher value wins.
+ * Returns how many entries were imported.
+ */
+export const syncOgpCache_ = (cache, force) => {
+  const now = Date.now();
+  if (!force) {
+    let last = 0;
+    try { last = Number(cache.get(ZE_OGP_SYNC_KEY) || 0); } catch (e) { /* treat as never synced */ }
+    if (last && now - last < ZE_OGP_SYNC_TTL * 1000) return 0;
+  }
+  let parsed = null;
+  try {
+    const res = UrlFetchApp.fetch(ZE_OGP_CACHE_URL, { muteHttpExceptions: true });
+    if (res && res.getResponseCode() === 200) parsed = JSON.parse(res.getContentText());
+  } catch (e) {
+    log_(`OG ze sync failed: ${e.message}`);
+  }
+  try { cache.put(ZE_OGP_SYNC_KEY, String(now), ZE_OGP_SYNC_TTL); } catch (e) { /* ignore */ }
+  const entries = (parsed && parsed.entries) || {};
+  let imported = 0;
+  Object.keys(entries).forEach((url) => {
+    const data = zeOgEntryToData_(entries[url]);
+    if (!data) return;
+    const key = ogCacheKey_(url);
+    try {
+      if (cache.get(key)) return;
+      cache.put(key, JSON.stringify(data), OG_CACHE_TTL);
+      imported++;
+    } catch (e) { /* ignore */ }
+  });
+  if (imported) log_(`OG ze sync: imported ${imported} entr${imported === 1 ? 'y' : 'ies'}`);
+  return imported;
+};
+
+/** Trigger target: import ze's OG cache now, ignoring the throttle. */
+export const syncOgpCache = () => {
+  syncOgpCache_(CacheService.getScriptCache(), true);
+};
+
+/** Queue one URL for fetching on ze. The response carries nothing. */
+export const triggerOgpFetch_ = (url, token) => {
+  UrlFetchApp.fetch(`${ZE_OGP_REQUEST_BASE}/${encodeURIComponent(url)}`, {
+    headers: { 'X-Api-Token': token },
+    muteHttpExceptions: true,
+  });
+};
+
+/**
+ * Run the ze tier over `urls`: import ze's cache, resolve whatever
+ * it already knows into `result`, then queue fetch requests for
+ * the rest (only when HOME_API_TOKEN is set — without the token
+ * the request gate on ze would reject them anyway). Returns the
+ * URLs that are still unresolved; the caller failure-caches them
+ * briefly, which also paces the re-requests.
+ */
+export const resolveOgViaZe_ = (urls, result, cache) => {
+  if (!urls.length) return urls;
+  syncOgpCache_(cache);
+  const keys = urls.map(ogCacheKey_);
+  const cached = cache.getAll(keys) || {};
+  const remaining = [];
+  urls.forEach((url, idx) => {
+    const raw = cached[keys[idx]];
+    if (raw) {
+      try {
+        const data = JSON.parse(raw);
+        if (data && (data.title || data.image)) {
+          result[url] = data;
+          return;
+        }
+      } catch (e) { /* fall through: stays unresolved */ }
+    }
+    remaining.push(url);
+  });
+  if (!remaining.length) return remaining;
+  const token = String(PropertiesService.getScriptProperties().getProperty('HOME_API_TOKEN') || '');
+  if (!token) return remaining;
+  let requested = 0;
+  remaining.forEach((url) => {
+    if (requested >= ZE_OGP_MAX_PER_RUN) return;
+    // ze accepts at most 1024 decoded characters per path segment.
+    if (url.length > ZE_OGP_MAX_URL_LENGTH) return;
+    requested++;
+    try {
+      triggerOgpFetch_(url, token);
+    } catch (e) {
+      log_(`OG ze request failed: ${url} (${e.message})`);
+    }
+  });
+  if (requested) log_(`OG ze tier: requested ${requested} fetch(es)`);
+  return remaining;
 };
 
 /** -----------------------------
