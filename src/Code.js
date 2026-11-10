@@ -708,8 +708,12 @@ export const OG_SCAN_LIMIT = 200000;
 export const OG_FETCH_BATCH_SIZE = 20;
 export const OG_RESOLVE_BUDGET_MS = 40000;
 export const OGP_API_CHUNK_CHARS = 1600;
-export const ZE_OGP_REQUEST_BASE = 'https://a.ze.gs/ogp';
-export const ZE_OGP_CACHE_URL = 'https://a.ze.gs/ogp-cache.json';
+// The home server's host name is never written into this public
+// repository: both ze URLs live in script properties
+// (OGP_ZE_REQUEST_BASE_URL, OGP_ZE_CACHE_URL), the same rule as
+// ROOM_DATA_BASE_URL below. Missing properties disable the tier.
+export const ZE_OGP_REQUEST_BASE_PROPERTY = 'OGP_ZE_REQUEST_BASE_URL';
+export const ZE_OGP_CACHE_URL_PROPERTY = 'OGP_ZE_CACHE_URL';
 export const ZE_OGP_MAX_PER_RUN = 3;
 export const ZE_OGP_SYNC_TTL = 600;
 export const ZE_OGP_SYNC_KEY = 'og:ze:sync:v1';
@@ -1009,8 +1013,9 @@ export const fetchOgDataFromApi_ = (urls) => {
  *  the direct UrlFetch and the shared OGP API (tabelog is the known
  *  case), but the home server can fetch them from its residential
  *  IP. The flow is asynchronous, built on altd: a GET to
- *  https://a.ze.gs/ogp/<encodeURIComponent(url)> (X-Api-Token gate,
- *  token in the HOME_API_TOKEN script property) only *queues* the
+ *  <OGP_ZE_REQUEST_BASE_URL property>/<encodeURIComponent(url)>
+ *  (X-Api-Token gate, token in the HOME_API_TOKEN script property)
+ *  only *queues* the
  *  URL; a batch on ze fetches it within minutes and publishes all
  *  results as one JSON file (ogp-cache.json, no auth — it holds
  *  only public pages' OG data). This tier therefore (1) imports
@@ -1036,6 +1041,10 @@ export const zeOgEntryToData_ = (entry) => {
  * Returns how many entries were imported.
  */
 export const syncOgpCache_ = (cache, force) => {
+  const cacheUrl = String(
+    PropertiesService.getScriptProperties().getProperty(ZE_OGP_CACHE_URL_PROPERTY) || ''
+  );
+  if (!cacheUrl) return 0;
   const now = Date.now();
   if (!force) {
     let last = 0;
@@ -1044,7 +1053,7 @@ export const syncOgpCache_ = (cache, force) => {
   }
   let parsed = null;
   try {
-    const res = UrlFetchApp.fetch(ZE_OGP_CACHE_URL, { muteHttpExceptions: true });
+    const res = UrlFetchApp.fetch(cacheUrl, { muteHttpExceptions: true });
     if (res && res.getResponseCode() === 200) parsed = JSON.parse(res.getContentText());
   } catch (e) {
     log_(`OG ze sync failed: ${e.message}`);
@@ -1072,8 +1081,8 @@ export const syncOgpCache = () => {
 };
 
 /** Queue one URL for fetching on ze. The response carries nothing. */
-export const triggerOgpFetch_ = (url, token) => {
-  UrlFetchApp.fetch(`${ZE_OGP_REQUEST_BASE}/${encodeURIComponent(url)}`, {
+export const triggerOgpFetch_ = (url, token, requestBase) => {
+  UrlFetchApp.fetch(`${requestBase}/${encodeURIComponent(url)}`, {
     headers: { 'X-Api-Token': token },
     muteHttpExceptions: true,
   });
@@ -1082,8 +1091,9 @@ export const triggerOgpFetch_ = (url, token) => {
 /**
  * Run the ze tier over `urls`: import ze's cache, resolve whatever
  * it already knows into `result`, then queue fetch requests for
- * the rest (only when HOME_API_TOKEN is set — without the token
- * the request gate on ze would reject them anyway). Returns the
+ * the rest (only when HOME_API_TOKEN and OGP_ZE_REQUEST_BASE_URL
+ * are set — without the token the request gate on ze would reject
+ * them anyway). Returns the
  * URLs that are still unresolved; the caller failure-caches them
  * briefly, which also paces the re-requests.
  */
@@ -1108,7 +1118,10 @@ export const resolveOgViaZe_ = (urls, result, cache) => {
   });
   if (!remaining.length) return remaining;
   const token = String(PropertiesService.getScriptProperties().getProperty('HOME_API_TOKEN') || '');
-  if (!token) return remaining;
+  const requestBase = String(
+    PropertiesService.getScriptProperties().getProperty(ZE_OGP_REQUEST_BASE_PROPERTY) || ''
+  );
+  if (!token || !requestBase) return remaining;
   let requested = 0;
   remaining.forEach((url) => {
     if (requested >= ZE_OGP_MAX_PER_RUN) return;
@@ -1116,7 +1129,7 @@ export const resolveOgViaZe_ = (urls, result, cache) => {
     if (url.length > ZE_OGP_MAX_URL_LENGTH) return;
     requested++;
     try {
-      triggerOgpFetch_(url, token);
+      triggerOgpFetch_(url, token, requestBase);
     } catch (e) {
       log_(`OG ze request failed: ${url} (${e.message})`);
     }

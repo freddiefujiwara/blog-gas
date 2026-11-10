@@ -36,7 +36,11 @@ const mockPropertiesService = {
 };
 
 const TEST_FOLDER_ID = 'test-folder-id';
+const ZE_TEST_CACHE_URL = 'https://ze.example/ogp-cache.json';
+const ZE_TEST_REQ_BASE = 'https://ze.example/ogp';
 const TEST_CONFIG = {
+  OGP_ZE_CACHE_URL: ZE_TEST_CACHE_URL,
+  OGP_ZE_REQUEST_BASE_URL: ZE_TEST_REQ_BASE,
   FOLDER_ID: TEST_FOLDER_ID,
   SITE_TITLE: 'Test Blog',
   SITE_URL: 'https://example.com/blog',
@@ -1745,7 +1749,7 @@ describe('Code.js', () => {
           title: 'ZE Title', image: 'https://example.com/ze.jpg', description: 'ZE desc',
         });
         const [reqUrl] = mockUrlFetchApp.fetch.mock.calls[0];
-        expect(reqUrl).toBe(Code.ZE_OGP_CACHE_URL);
+        expect(reqUrl).toBe(ZE_TEST_CACHE_URL);
       });
 
       it('does not overwrite an entry the local cache already holds', () => {
@@ -1758,6 +1762,13 @@ describe('Code.js', () => {
         });
         expect(Code.syncOgpCache_(mockCache, true)).toBe(0);
         expect(JSON.parse(store.get(Code.ogCacheKey_(URL_A))).title).toBe('Local');
+      });
+
+      it('does nothing when OGP_ZE_CACHE_URL is not configured', () => {
+        mockProperties.getProperty.mockImplementation((key) => (
+          key === 'OGP_ZE_CACHE_URL' ? null : (TEST_CONFIG[key] ?? null)));
+        expect(Code.syncOgpCache_(mockCache, true)).toBe(0);
+        expect(mockUrlFetchApp.fetch).not.toHaveBeenCalled();
       });
 
       it('is throttled by the sync marker unless forced', () => {
@@ -1800,7 +1811,7 @@ describe('Code.js', () => {
         }]);
         // Default ze state: cache JSON is empty; requests succeed silently.
         mockUrlFetchApp.fetch.mockImplementation((url) => {
-          if (url === Code.ZE_OGP_CACHE_URL) {
+          if (url === ZE_TEST_CACHE_URL) {
             return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ version: 1, entries: {} }) };
           }
           return { getResponseCode: () => 200, getContentText: () => '' };
@@ -1808,13 +1819,13 @@ describe('Code.js', () => {
       });
 
       const zeJsonWith = (entries) => (url) => {
-        if (url === Code.ZE_OGP_CACHE_URL) {
+        if (url === ZE_TEST_CACHE_URL) {
           return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ version: 1, entries }) };
         }
         return { getResponseCode: () => 200, getContentText: () => '' };
       };
       const requestCalls = () => mockUrlFetchApp.fetch.mock.calls
-        .filter(([url]) => String(url).startsWith(Code.ZE_OGP_REQUEST_BASE + '/'));
+        .filter(([url]) => String(url).startsWith(ZE_TEST_REQ_BASE + '/'));
 
       it('resolves a blocked URL from the imported ze entry, without requesting it', () => {
         mockUrlFetchApp.fetch.mockImplementation(zeJsonWith({ [URL_A]: ZE_OK_ENTRY }));
@@ -1834,7 +1845,7 @@ describe('Code.js', () => {
         expect(result[URL_A]).toBeUndefined();
         expect(requestCalls()).toHaveLength(1);
         const [reqUrl, reqOpts] = requestCalls()[0];
-        expect(reqUrl).toBe(`${Code.ZE_OGP_REQUEST_BASE}/${encodeURIComponent(URL_A)}`);
+        expect(reqUrl).toBe(`${ZE_TEST_REQ_BASE}/${encodeURIComponent(URL_A)}`);
         expect(reqOpts.headers['X-Api-Token']).toBe('test-token');
         expect(store.get(Code.ogCacheKey_(URL_A))).toBe(JSON.stringify({}));
       });
