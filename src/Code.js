@@ -722,6 +722,12 @@ export const ZE_OGP_MAX_URL_LENGTH = 1024;
 // OG data for the document currently being converted (per execution).
 let ogDataByUrl_ = {};
 
+// URLs whose link card the author wants grayed out: a
+// [[画像グレーアウト]] marker paragraph right before the link
+// paragraph flags that card, and front-ends gray it out via CSS.
+// Any article can use the marker; generators may emit it too.
+let grayoutCardUrls_ = {};
+
 export const ogCacheKey_ = (url) => {
   const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
     .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
@@ -1217,6 +1223,23 @@ export const resolveRoomOgData_ = (urls) => {
   }
 };
 
+// A [[画像グレーアウト]] marker paragraph flags the link card
+// that follows it for graying out. Like the tag and music markers,
+// the marker itself never reaches the markdown.
+export const parseGrayoutMarker_ = (text) => {
+  if (typeof text !== 'string') return null;
+  return /^\[\[\s*画像グレーアウト\s*\]\]$/.test(text.trim()) ? true : null;
+};
+
+export const isGrayoutMarkerElement_ = (el) => {
+  try {
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
+    return parseGrayoutMarker_(paragraphPlainText_(el.asParagraph())) !== null;
+  } catch (e) {
+    return false;
+  }
+};
+
 export const linkCardMarkdown_ = (url, og) => {
   if (!og || (!og.title && !og.image)) return null;
   const title = og.title || url;
@@ -1224,7 +1247,8 @@ export const linkCardMarkdown_ = (url, og) => {
   const desc = og.description ? `<span class="link-card-description">${escapeXml_(og.description)}</span>` : '';
   const domainMatch = String(url).match(/^https?:\/\/([^/]+)/);
   const domain = domainMatch ? domainMatch[1] : '';
-  return `<a class="link-card" href="${escapeXml_(url)}" target="_blank" rel="noopener noreferrer">${img}<span class="link-card-body"><span class="link-card-title">${escapeXml_(title)}</span>${desc}<span class="link-card-domain">${escapeXml_(domain)}</span></span></a>\n`;
+  const cardClass = grayoutCardUrls_[url] ? 'link-card is-grayout' : 'link-card';
+  return `<a class="${cardClass}" href="${escapeXml_(url)}" target="_blank" rel="noopener noreferrer">${img}<span class="link-card-body"><span class="link-card-title">${escapeXml_(title)}</span>${desc}<span class="link-card-domain">${escapeXml_(domain)}</span></span></a>\n`;
 };
 
 /** -----------------------------
@@ -1234,12 +1258,20 @@ export const docBodyToMarkdown_ = (doc) => {
   const body = doc.getBody();
   const children = Array.from({ length: body.getNumChildren() }, (_, i) => body.getChild(i));
   ogDataByUrl_ = {};
+  grayoutCardUrls_ = {};
   try {
     const urls = [];
-    children.forEach((el) => {
+    children.forEach((el, idx) => {
       if (el.getType() === DocumentApp.ElementType.PARAGRAPH) {
         const url = standaloneLinkUrl_(el.asParagraph());
         if (url && !urls.includes(url)) urls.push(url);
+      }
+      if (isGrayoutMarkerElement_(el) && idx + 1 < children.length) {
+        const next = children[idx + 1];
+        if (next.getType() === DocumentApp.ElementType.PARAGRAPH) {
+          const nextUrl = standaloneLinkUrl_(next.asParagraph());
+          if (nextUrl) grayoutCardUrls_[nextUrl] = true;
+        }
       }
     });
     if (urls.length) log_(`OG targets: ${urls.length} (${urls.join(', ')})`);
@@ -1249,17 +1281,21 @@ export const docBodyToMarkdown_ = (doc) => {
   } catch (e) {
     log_(`OG pre-resolve failed: ${e.message}`);
     ogDataByUrl_ = {};
+    grayoutCardUrls_ = {};
   }
   // Tag marker paragraphs are metadata, not content: they are
   // extracted via extractDocTags_ and never reach the markdown.
-  // Music marker paragraphs become player placeholders instead.
+  // Music marker paragraphs become player placeholders instead, and
+  // grayout markers only flag the card that follows them.
   const out = children.map((el) => {
     if (isTagMarkerElement_(el)) return '';
+    if (isGrayoutMarkerElement_(el)) return '';
     const music = musicMarkerFromElement_(el);
     if (music) return `${musicTrackMarkdown_(music)}\n`;
     return elementToMarkdown_(el);
   });
   ogDataByUrl_ = {};
+  grayoutCardUrls_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
 

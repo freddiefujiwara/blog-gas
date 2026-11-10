@@ -2005,6 +2005,64 @@ describe('Code.js', () => {
         expect(markdown).toContain('Cached Title');
       });
 
+      const docWithChildren = (paragraphs) => ({
+        getBody: () => ({
+          getNumChildren: () => paragraphs.length,
+          getChild: (i) => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => paragraphs[i],
+          }),
+        }),
+      });
+      const cachedOg = () => {
+        mockCache.getAll.mockReturnValue({
+          [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached Title', image: 'https://example.com/og.jpg', description: 'Desc' }),
+        });
+      };
+
+      it('grays out the card when a [[画像グレーアウト]] marker precedes the link', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('[[画像グレーアウト]]')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card is-grayout"');
+        expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      it('does not gray out the card without the marker', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('ただの本文です')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-grayout');
+      });
+
+      it('does not gray out the card when the marker is not immediately before the link', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('[[画像グレーアウト]]')]),
+          linkPara([textChild('ただの本文です')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-grayout');
+        expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      it('parses the grayout marker strictly', () => {
+        expect(Code.parseGrayoutMarker_('[[画像グレーアウト]]')).toBe(true);
+        expect(Code.parseGrayoutMarker_(' [[画像グレーアウト]] ')).toBe(true);
+        expect(Code.parseGrayoutMarker_('[[画像グレーアウト]]です')).toBeNull();
+        expect(Code.parseGrayoutMarker_('画像グレーアウト')).toBeNull();
+        expect(Code.parseGrayoutMarker_(null)).toBeNull();
+      });
+
       it('keeps a plain link when no OG data is available', () => {
         mockCache.getAll.mockReturnValue({});
         mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 500, getContentText: () => '' }]);
