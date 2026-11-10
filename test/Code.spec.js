@@ -2005,6 +2005,54 @@ describe('Code.js', () => {
         expect(markdown).toContain('Cached Title');
       });
 
+      const docWithChildren = (paragraphs) => ({
+        getBody: () => ({
+          getNumChildren: () => paragraphs.length,
+          getChild: (i) => ({
+            getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+            asParagraph: () => paragraphs[i],
+          }),
+        }),
+      });
+      const cachedOg = () => {
+        mockCache.getAll.mockReturnValue({
+          [Code.ogCacheKey_(URL_A)]: JSON.stringify({ title: 'Cached Title', image: 'https://example.com/og.jpg', description: 'Desc' }),
+        });
+      };
+
+      it('marks the card as cancelled when the previous paragraph notes a cancellation', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('中国語学習のために使っているサービスです（解約手続き済みで、2027年9月26日まで利用できます）')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card is-cancelled"');
+      });
+
+      it('does not mark the card when the previous paragraph has no cancellation note', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('中国語学習のために使っているサービスです')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-cancelled');
+      });
+
+      it('does not mark the card when the cancellation note is not in the immediately previous paragraph', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('解約手続き済みのサービスです')]),
+          linkPara([textChild('ただの本文です')]),
+          linkPara([textChild(URL_A, { LINK_URL: URL_A })]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-cancelled');
+      });
+
       it('keeps a plain link when no OG data is available', () => {
         mockCache.getAll.mockReturnValue({});
         mockUrlFetchApp.fetchAll.mockReturnValue([{ getResponseCode: () => 500, getContentText: () => '' }]);
