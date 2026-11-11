@@ -684,10 +684,14 @@ export const exportInlineImage_ = (image) => {
   return imageUrl_(file.getId());
 };
 
-export const inlineImageToMarkdown_ = (image) => {
+export const inlineImageToMarkdown_ = (image, grayout = false) => {
   try {
     const url = exportInlineImage_(image);
     const alt = (image.getAltDescription() || '').replace(/[\[\]\n]/g, ' ').trim();
+    // A grayed-out image is emitted as raw HTML so the front-ends can
+    // flag it with the is-grayout class; Markdown image syntax has no
+    // way to carry a class.
+    if (grayout) return `\n\n<img class="is-grayout" src="${escapeXml_(url)}" alt="${escapeXml_(alt)}">\n\n`;
     return `\n\n![${alt}](${url})\n\n`;
   } catch (e) {
     log_(`Image export failed: ${e.message}`);
@@ -725,6 +729,8 @@ let ogDataByUrl_ = {};
 // URLs whose link card the author wants grayed out: a
 // [[画像グレーアウト]] marker paragraph right before the link
 // paragraph flags that card, and front-ends gray it out via CSS.
+// The same marker right before an image paragraph flags that image
+// instead (handled positionally in docBodyToMarkdown_).
 // Any article can use the marker; generators may emit it too.
 let grayoutCardUrls_ = {};
 
@@ -1223,9 +1229,9 @@ export const resolveRoomOgData_ = (urls) => {
   }
 };
 
-// A [[画像グレーアウト]] marker paragraph flags the link card
-// that follows it for graying out. Like the tag and music markers,
-// the marker itself never reaches the markdown.
+// A [[画像グレーアウト]] marker paragraph flags the link card or
+// image that follows it for graying out. Like the tag and music
+// markers, the marker itself never reaches the markdown.
 export const parseGrayoutMarker_ = (text) => {
   if (typeof text !== 'string') return null;
   return /^\[\[\s*画像グレーアウト\s*\]\]$/.test(text.trim()) ? true : null;
@@ -1286,23 +1292,26 @@ export const docBodyToMarkdown_ = (doc) => {
   // Tag marker paragraphs are metadata, not content: they are
   // extracted via extractDocTags_ and never reach the markdown.
   // Music marker paragraphs become player placeholders instead, and
-  // grayout markers only flag the card that follows them.
-  const out = children.map((el) => {
+  // grayout markers flag the card or image that follows them.
+  const out = children.map((el, idx) => {
     if (isTagMarkerElement_(el)) return '';
     if (isGrayoutMarkerElement_(el)) return '';
     const music = musicMarkerFromElement_(el);
     if (music) return `${musicTrackMarkdown_(music)}\n`;
-    return elementToMarkdown_(el);
+    // The card case is keyed by URL in the pre-scan above; an image
+    // paragraph right after the marker is flagged positionally here.
+    const grayoutImage = idx > 0 && isGrayoutMarkerElement_(children[idx - 1]);
+    return elementToMarkdown_(el, { grayoutImage });
   });
   ogDataByUrl_ = {};
   grayoutCardUrls_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
 };
 
-export const elementToMarkdown_ = (el) => {
+export const elementToMarkdown_ = (el, options = {}) => {
   const t = el.getType();
   const converters = {
-    [DocumentApp.ElementType.PARAGRAPH]: (e) => paragraphToMarkdown_(e.asParagraph()),
+    [DocumentApp.ElementType.PARAGRAPH]: (e) => paragraphToMarkdown_(e.asParagraph(), options.grayoutImage === true),
     [DocumentApp.ElementType.LIST_ITEM]: (e) => listItemToMarkdown_(e.asListItem()),
     [DocumentApp.ElementType.TABLE]: (e) => tableToMarkdown_(e.asTable()),
     [DocumentApp.ElementType.HORIZONTAL_RULE]: () => '\n---\n',
@@ -1318,8 +1327,8 @@ export const elementToMarkdown_ = (el) => {
   return '';
 };
 
-export const paragraphToMarkdown_ = (p) => {
-  const text = paragraphTextWithInlineStyles_(p).trim();
+export const paragraphToMarkdown_ = (p, grayoutImage = false) => {
+  const text = paragraphTextWithInlineStyles_(p, grayoutImage).trim();
   if (!text) return '';
   const prefix = headingToPrefix_(p.getHeading());
   if (prefix) return `${prefix} ${text}\n`;
@@ -1379,7 +1388,7 @@ export const isOrderedGlyph_ = (glyphType) => /NUMBER|LATIN|ROMAN|ALPHA/i.test(S
 /**
  * Convert bold/italic/links in paragraph to Markdown (Fast/Robust version)
  */
-export const paragraphTextWithInlineStyles_ = (p) => {
+export const paragraphTextWithInlineStyles_ = (p, grayoutImage = false) => {
   const { BOLD, ITALIC, LINK_URL } = DocumentApp.Attribute;
   const out = [];
 
@@ -1411,7 +1420,7 @@ export const paragraphTextWithInlineStyles_ = (p) => {
     const child = p.getChild(i);
     if (child.getType() === DocumentApp.ElementType.INLINE_IMAGE) {
       closeInline();
-      out.push(inlineImageToMarkdown_(child.asInlineImage()));
+      out.push(inlineImageToMarkdown_(child.asInlineImage(), grayoutImage));
       continue;
     }
     if (child.getType() !== DocumentApp.ElementType.TEXT) continue;

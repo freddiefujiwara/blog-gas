@@ -771,6 +771,24 @@ describe('Code.js', () => {
         expect(Code.paragraphToMarkdown_(mockP)).toBe('![テスト画像](https://lh3.googleusercontent.com/d/existing42)\n');
       });
 
+      it('should render a grayed-out image as raw HTML with the is-grayout class', () => {
+        mockImageFolder.getFilesByName.mockReturnValue(oneFileIterator);
+        expect(Code.inlineImageToMarkdown_(mockImage, true)).toBe('\n\n<img class="is-grayout" src="https://lh3.googleusercontent.com/d/existing42" alt="テスト画像">\n\n');
+      });
+
+      it('should render an image-only paragraph with the grayout flag as raw HTML', () => {
+        mockImageFolder.getFilesByName.mockReturnValue(oneFileIterator);
+        const mockP = {
+          getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => ({
+            getType: () => mockDocumentApp.ElementType.INLINE_IMAGE,
+            asInlineImage: () => mockImage,
+          }),
+        };
+        expect(Code.paragraphToMarkdown_(mockP, true)).toBe('<img class="is-grayout" src="https://lh3.googleusercontent.com/d/existing42" alt="テスト画像">\n');
+      });
+
       it('should return empty string when the image export fails', () => {
         const badImage = { getBlob: () => { throw new Error('no blob'); }, getAltDescription: () => '' };
         expect(Code.inlineImageToMarkdown_(badImage)).toBe('');
@@ -2051,6 +2069,52 @@ describe('Code.js', () => {
         ]);
         const markdown = Code.docBodyToMarkdown_(doc);
         expect(markdown).toContain('class="link-card"');
+        expect(markdown).not.toContain('is-grayout');
+        expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      const imagePara = () => ({
+        getHeading: () => mockDocumentApp.ParagraphHeading.NORMAL,
+        getNumChildren: () => 1,
+        getChild: () => ({
+          getType: () => mockDocumentApp.ElementType.INLINE_IMAGE,
+          asInlineImage: () => ({
+            getBlob: () => ({ getBytes: () => [1, 2, 3], getContentType: () => 'image/png', setName: vi.fn().mockReturnThis() }),
+            getAltDescription: () => 'テスト画像',
+          }),
+        }),
+      });
+      const setupImageDrive = () => {
+        const folder = {
+          getFilesByName: vi.fn().mockReturnValue({ hasNext: () => true, next: () => ({ getId: () => 'existing42' }) }),
+          createFile: vi.fn(),
+        };
+        mockDriveApp.getFolderById.mockReturnValue({
+          getFoldersByName: vi.fn().mockReturnValue({ hasNext: () => true, next: () => folder }),
+        });
+      };
+
+      it('grays out the image when a [[画像グレーアウト]] marker precedes the image paragraph', () => {
+        setupImageDrive();
+        const doc = docWithChildren([
+          linkPara([textChild('[[画像グレーアウト]]')]),
+          imagePara(),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('<img class="is-grayout" src="https://lh3.googleusercontent.com/d/existing42" alt="テスト画像">');
+        expect(markdown).not.toContain('![');
+        expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      it('does not gray out the image when the marker is not immediately before it', () => {
+        setupImageDrive();
+        const doc = docWithChildren([
+          linkPara([textChild('[[画像グレーアウト]]')]),
+          linkPara([textChild('ただの本文です')]),
+          imagePara(),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('![テスト画像](https://lh3.googleusercontent.com/d/existing42)');
         expect(markdown).not.toContain('is-grayout');
         expect(markdown).not.toContain('画像グレーアウト');
       });
