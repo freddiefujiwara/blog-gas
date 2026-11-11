@@ -20,6 +20,10 @@ export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
 export const RSS_CACHE_LIMIT = 50;
+// Time budget for converting stale article snapshots in one
+// preCacheAll run; articles it cannot reach stay stale and are
+// picked up by the next run, so repeated runs converge.
+export const SNAPSHOT_BUDGET_MS = 240000;
 export const IMAGE_FOLDER_NAME = 'images';
 
 /**
@@ -50,37 +54,69 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  // The newest PRE_CACHE_LIMIT articles, plus any pinned articles
-  // (PRE_CACHE_PINNED_IDS) that must stay cached no matter how old
-  // they are — large evergreen articles otherwise fall out of the
-  // window and are re-converted on every view (~20s a load).
+  // Two layers are warmed here. The Drive snapshot layer is the
+  // durable one: every article whose snapshot is missing or older
+  // than its Doc is (re)converted and stored, so reads never have
+  // to convert (readDriveArticleCache_ holds the freshness rule).
+  // The CacheService layer stays a short-lived hot set — the
+  // newest PRE_CACHE_LIMIT articles, plus any pinned articles
+  // (PRE_CACHE_PINNED_IDS) — served straight from the cache while
+  // it lasts. Pinned articles no longer need special storage
+  // treatment (every article gets a snapshot now); they are simply
+  // converted first.
   const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
   for (const id of getConfig_().pinnedIds) {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
   }
+  const targetSet = new Set(targetIds);
+  const titleById = {};
+  docs.forEach((d) => { titleById[d.id] = d.title; });
 
+  // Hot-set articles convert unconditionally (they are few); the
+  // remaining articles share the snapshot time budget, so one run
+  // stays well inside the execution limit.
+  const orderedIds = [...targetIds, ...allIds.filter((id) => !targetSet.has(id))];
+  const snapshotDeadline = Date.now() + SNAPSHOT_BUDGET_MS;
   const convertedTags = {};
-  for (const id of targetIds) {
+  for (const id of orderedIds) {
     try {
+      const snapshot = readDriveArticleCache_(id);
+      if (snapshot) {
+        // Fresh enough to serve as-is. A rename also moves the
+        // Doc's modified time (forcing a reconversion), but patch a
+        // drifted title in place as well so it never has to wait
+        // for one.
+        if (titleById[id] && snapshot.title !== titleById[id]) {
+          writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
+          snapshot.title = titleById[id];
+          console.log(`Snapshot title updated: ${titleById[id]}`);
+        }
+        convertedTags[id] = snapshot.tags;
+        if (targetSet.has(id)) {
+          const payload = JSON.stringify(snapshot);
+          if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
+        }
+        continue;
+      }
+      if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
       const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
       convertedTags[id] = article.tags;
+      writeDriveArticleCache_(article);
 
       if (JSON.stringify(article).length < CACHE_SIZE_LIMIT) {
-        cache.put(id, JSON.stringify(article), CACHE_TTL);
+        if (targetSet.has(id)) cache.put(id, JSON.stringify(article), CACHE_TTL);
         console.log(`Saved: ${title}`);
       } else {
-        // Too large for CacheService: keep the conversion in the
-        // Drive-backed cache instead of dropping it (a 203-link
-        // article was re-converted on every request before this).
-        writeDriveArticleCache_(article);
         console.log(`Saved to Drive cache: ${title}`);
       }
     } catch (e) {
       console.error(`Failed to save ID:${id}: ${e.message}`);
     }
   }
+
+  pruneOrphanSnapshots_(allIds);
 
   // Warm the tags map (every article, not only the ones converted
   // above) so list/titles responses can serve it straight from
@@ -122,6 +158,30 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`Failed to save tags: ${e.message}`);
   }
+};
+
+/**
+ * [Manual] Re-convert one article and refresh its stores, for when
+ * a snapshot must be rebuilt without editing the Doc — link-card
+ * (OGP) data, for example, stays frozen inside a snapshot until
+ * the Doc changes. Run from the editor with the article's Doc id,
+ * or simply delete the article's snapshot file in the
+ * article-cache folder and let the next read or preCacheAll run
+ * rebuild it.
+ */
+export const refreshArticleSnapshot = (docId) => {
+  const info = getDocInfoInFolder_(getConfig_().folderId, docId);
+  if (!info.exists) {
+    console.log(`Article not found in folder: ${docId}`);
+    return null;
+  }
+  const doc = DocumentApp.openById(docId);
+  const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+  const cache = CacheService.getScriptCache();
+  if (typeof cache.remove === 'function') cache.remove(docId);
+  storeConvertedArticle_(article, cache);
+  console.log(`Snapshot refreshed: ${article.title}`);
+  return article;
 };
 
 /**
@@ -233,12 +293,14 @@ export const clearCacheAll = () => {
 };
 
 /** -----------------------------
- *  Drive-backed article cache for articles whose converted payload
- *  is too large for CacheService (100 KB per value). The converted
- *  JSON is kept in an "article-cache" subfolder of the article
- *  folder, stamped with the source Doc's last-modified time; a read
- *  only serves it when the stamp still matches, so a regenerated
- *  Doc is never shadowed by a stale conversion.
+ *  Drive-backed article snapshots: the durable store of converted
+ *  articles, for every article regardless of size (CacheService
+ *  above it is only a short-lived hot layer, and cannot hold
+ *  payloads over 100 KB per value anyway). The converted JSON is
+ *  kept in an "article-cache" subfolder of the article folder,
+ *  stamped with the source Doc's last-modified time; a read only
+ *  serves it when the stamp still matches, so an edited Doc is
+ *  never shadowed by a stale conversion.
  *  ----------------------------- */
 export const ARTICLE_CACHE_FOLDER_NAME = 'article-cache';
 
@@ -282,6 +344,48 @@ export const writeDriveArticleCache_ = (article) => {
     }
   } catch (e) {
     log_(`Drive article cache write failed (${article.id}): ${e.message}`);
+  }
+};
+
+/**
+ * Persist a freshly converted article: always to the Drive
+ * snapshot (any size), and to CacheService too when it fits.
+ * Called by every request-time conversion, so the next read is
+ * served from a store instead of converting again. Failures are
+ * logged and swallowed — serving the article matters more.
+ */
+export const storeConvertedArticle_ = (article, cache) => {
+  writeDriveArticleCache_(article);
+  try {
+    const payload = JSON.stringify(article);
+    if (payload.length < CACHE_SIZE_LIMIT) {
+      (cache || CacheService.getScriptCache()).put(article.id, payload, CACHE_TTL);
+    }
+  } catch (e) {
+    log_(`Cache store failed (${article.id}): ${e.message}`);
+  }
+};
+
+/**
+ * Remove snapshot files whose source Doc is no longer in the
+ * article folder (deleted or moved away), so the cache folder
+ * only ever holds live articles. tags.json lives in the same
+ * folder but is not an article snapshot and is always kept.
+ */
+export const pruneOrphanSnapshots_ = (liveIds) => {
+  try {
+    const folder = getArticleCacheFolder_();
+    if (typeof folder.getFiles !== 'function') return;
+    const live = new Set(liveIds);
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const file = files.next();
+      const name = file.getName();
+      if (name === TAGS_FILE_NAME || !name.endsWith('.json')) continue;
+      if (!live.has(name.slice(0, -'.json'.length))) file.setTrashed(true);
+    }
+  } catch (e) {
+    log_(`Snapshot prune failed: ${e.message}`);
   }
 };
 
@@ -580,7 +684,9 @@ export const doGet = (e) => {
         const info = getDocInfoInFolder_(getConfig_().folderId, id);
         if (info.exists) {
           const doc = DocumentApp.openById(id);
-          return { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+          const article = { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+          storeConvertedArticle_(article, cache);
+          return article;
         }
       } catch (err) {
         log_(`Error fetching article ${id}: ${err.message}`);
@@ -617,7 +723,9 @@ export const doGet = (e) => {
   if (!info.exists) return jsonError_('Document not found');
 
   const doc = DocumentApp.openById(docId);
-  return json_({ id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) });
+  const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+  storeConvertedArticle_(article, cache);
+  return json_(article);
 };
 
 /** -----------------------------

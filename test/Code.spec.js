@@ -365,7 +365,7 @@ describe('Code.js', () => {
       }));
     });
 
-    it('should fetch list and articles from Drive/Docs on cache miss (but NOT save to cache)', () => {
+    it('should fetch list and articles from Drive/Docs on cache miss, storing converted articles for the next read', () => {
       mockCache.get.mockReturnValue(null);
       mockCache.getAll.mockReturnValue({});
 
@@ -411,7 +411,7 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(TEST_FOLDER_ID);
-      expect(mockCache.put).not.toHaveBeenCalled();
+      expect(mockCache.put).toHaveBeenCalledWith('id1', expect.stringContaining('"title":"Doc 1"'), Code.CACHE_TTL);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"titles":{"id1":"Doc 1"}'));
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
     });
@@ -603,7 +603,7 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({ error: 'Document not found' }));
     });
 
-    it('should fetch and return document when ID is specified but not in cache (but NOT save to cache)', () => {
+    it('should fetch and return document when ID is specified but not in cache, storing it for the next read', () => {
       const fileId = 'valid-id';
       mockCache.get.mockReturnValue(null);
 
@@ -632,7 +632,7 @@ describe('Code.js', () => {
       const e = { parameter: { id: fileId } };
       Code.doGet(e);
 
-      expect(mockCache.put).not.toHaveBeenCalled();
+      expect(mockCache.put).toHaveBeenCalledWith(fileId, expect.stringContaining('"title":"Valid Doc"'), Code.CACHE_TTL);
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
     });
   });
@@ -2411,6 +2411,168 @@ describe('Code.js', () => {
       Code.preCacheAll();
       expect(mockCache.put).not.toHaveBeenCalledWith('large-id', expect.any(String), Code.CACHE_TTL);
       expect(stored.has('large-id.json')).toBe(true);
+    });
+  });
+
+  describe('Article snapshots for every article', () => {
+    const MODIFIED = 1700000000000;
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      content,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+      setTrashed: vi.fn(),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+      createFile: vi.fn((name, content) => {
+        const f = makeFile(name, content);
+        stored.set(name, f);
+        return f;
+      }),
+    };
+    const articleFolder = (files) => {
+      let i = 0;
+      return {
+        getFilesByType: vi.fn(() => ({ hasNext: () => i < files.length, next: () => files[i++] })),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      };
+    };
+    const emptyBodyDoc = (name) => ({
+      getName: () => name,
+      getBody: () => ({ getNumChildren: () => 0 }),
+    });
+    const fullFile = (name) => ({
+      getLastUpdated: () => new Date(MODIFIED),
+      getMimeType: () => mockMimeType.GOOGLE_DOCS,
+      getParents: () => ({ hasNext: () => true, next: () => ({ getId: () => TEST_FOLDER_ID }) }),
+      getName: () => name,
+    });
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      cacheFolder.createFile.mockClear();
+      mockCache.get.mockReturnValue(null);
+      mockCache.getAll.mockReturnValue({});
+      mockContentService.createTextOutput.mockReturnValue({ setMimeType: vi.fn().mockReturnThis() });
+    });
+
+    it('doGet serves a small article from a fresh Drive snapshot without opening the Doc', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.doGet({ parameter: { id: 'doc-x' } });
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"MD"'));
+    });
+
+    it('doGet reconverts a stale snapshot and overwrites it', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'Old', markdown: 'OLD', tags: [], sourceModified: MODIFIED - 1 })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue(fullFile('Doc X'));
+      mockDocumentApp.openById.mockReturnValue(emptyBodyDoc('Doc X'));
+
+      Code.doGet({ parameter: { id: 'doc-x' } });
+
+      const saved = JSON.parse(stored.get('doc-x.json').content);
+      expect(saved.sourceModified).toBe(MODIFIED);
+      expect(saved.markdown).not.toBe('OLD');
+      expect(mockCache.put).toHaveBeenCalledWith('doc-x', expect.any(String), Code.CACHE_TTL);
+    });
+
+    it('preCacheAll skips conversion when the snapshot is already fresh', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: [], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([{ getId: () => 'doc-x', getName: () => 'T' }]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.preCacheAll();
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(JSON.parse(stored.get('doc-x.json').content).markdown).toBe('MD');
+    });
+
+    it('preCacheAll patches a drifted snapshot title without reconverting', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'Old Title', markdown: 'MD', tags: [], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([{ getId: () => 'doc-x', getName: () => 'New Title' }]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.preCacheAll();
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      const saved = JSON.parse(stored.get('doc-x.json').content);
+      expect(saved.title).toBe('New Title');
+      expect(saved.markdown).toBe('MD');
+      expect(saved.sourceModified).toBe(MODIFIED);
+    });
+
+    it('preCacheAll creates snapshots for articles outside the hot set too', () => {
+      const files = [];
+      for (let i = 0; i < Code.PRE_CACHE_LIMIT + 2; i++) {
+        files.push({ getId: () => `id${i}`, getName: () => `Doc ${i}` });
+      }
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder(files));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      mockDocumentApp.openById.mockImplementation((id) => emptyBodyDoc(`Doc ${id}`));
+
+      Code.preCacheAll();
+
+      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 2);
+      const docPuts = mockCache.put.mock.calls.filter((c) => String(c[0]).startsWith('id'));
+      expect(docPuts).toHaveLength(Code.PRE_CACHE_LIMIT);
+    });
+
+    it('pruneOrphanSnapshots_ trashes snapshots of missing Docs and keeps the rest', () => {
+      const live = { getName: () => 'live-id.json', setTrashed: vi.fn() };
+      const gone = { getName: () => 'gone-id.json', setTrashed: vi.fn() };
+      const tags = { getName: () => 'tags.json', setTrashed: vi.fn() };
+      const files = [live, gone, tags];
+      let i = 0;
+      const folder = { getFiles: () => ({ hasNext: () => i < files.length, next: () => files[i++] }) };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: () => ({ hasNext: () => true, next: () => folder }),
+      });
+
+      Code.pruneOrphanSnapshots_(['live-id']);
+
+      expect(gone.setTrashed).toHaveBeenCalledWith(true);
+      expect(live.setTrashed).not.toHaveBeenCalled();
+      expect(tags.setTrashed).not.toHaveBeenCalled();
+    });
+
+    it('storeConvertedArticle_ writes oversized articles to Drive only', () => {
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.storeConvertedArticle_({ id: 'big', title: 'B', markdown: 'a'.repeat(Code.CACHE_SIZE_LIMIT), tags: [] }, mockCache);
+
+      expect(stored.has('big.json')).toBe(true);
+      expect(mockCache.put).not.toHaveBeenCalledWith('big', expect.anything(), expect.anything());
+    });
+
+    it('refreshArticleSnapshot reconverts and stores one article', () => {
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue(fullFile('Doc X'));
+      mockDocumentApp.openById.mockReturnValue(emptyBodyDoc('Doc X'));
+
+      const article = Code.refreshArticleSnapshot('doc-x');
+
+      expect(article.title).toBe('Doc X');
+      expect(stored.has('doc-x.json')).toBe(true);
+    });
+
+    it('refreshArticleSnapshot returns null for an article outside the folder', () => {
+      mockDriveApp.getFileById.mockImplementation(() => { throw new Error('Not found'); });
+
+      expect(Code.refreshArticleSnapshot('missing')).toBeNull();
+      expect(stored.size).toBe(0);
     });
   });
 
