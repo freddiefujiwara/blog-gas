@@ -445,9 +445,29 @@ export const writeSnapshotIndex_ = (index) => {
     const payload = JSON.stringify(index);
     const folder = getArticleCacheFolder_();
     const files = folder.getFilesByName(SNAPSHOT_INDEX_FILE_NAME);
-    if (files.hasNext()) {
-      files.next().setContent(payload);
-    } else {
+    let written = false;
+    const seen = new Set();
+    while (files.hasNext()) {
+      const file = files.next();
+      // Guard against iterators that hand back the same file
+      // twice: each copy is handled exactly once.
+      const key = typeof file.getId === 'function' ? file.getId() : file;
+      if (seen.has(key)) break;
+      seen.add(key);
+      if (!written) {
+        file.setContent(payload);
+        written = true;
+      } else if (typeof file.setTrashed === 'function') {
+        // Duplicate index files appear when two executions create
+        // the file before either can see the other's copy (Drive
+        // name search is eventually consistent) — observed in
+        // production on 2026-11-12, right after the index was
+        // introduced. Keep exactly one copy so a later read never
+        // picks a stale twin.
+        file.setTrashed(true);
+      }
+    }
+    if (!written) {
       folder.createFile(SNAPSHOT_INDEX_FILE_NAME, payload, MimeType.PLAIN_TEXT);
     }
   } catch (e) {
