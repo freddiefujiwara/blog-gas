@@ -78,8 +78,52 @@ export const preCacheAll = () => {
   const orderedIds = [...targetIds, ...allIds.filter((id) => !targetSet.has(id))];
   const snapshotDeadline = Date.now() + SNAPSHOT_BUDGET_MS;
   const convertedTags = {};
+
+  // Freshness is decided from the snapshot index (one small file)
+  // instead of downloading every snapshot just to compare stamps:
+  // an entry whose stamp still matches the Doc's modified time is
+  // served as-is, and its snapshot is only opened when the article
+  // belongs to the hot set or its title drifted. Articles the
+  // index does not know (or cannot date) fall back to reading the
+  // snapshot itself, exactly as before, and backfill their entry
+  // so the next run stays cheap.
+  const modifiedById = {};
+  docs.forEach((d) => { modifiedById[d.id] = d.modified; });
+  const snapshotIndex = readSnapshotIndex_();
+  let snapshotIndexDirty = false;
+  const rememberIndex_ = (id, title, tags) => {
+    if (modifiedById[id] == null) return;
+    snapshotIndex[id] = { sourceModified: modifiedById[id], title, tags };
+    snapshotIndexDirty = true;
+  };
+
   for (const id of orderedIds) {
     try {
+      const entry = snapshotIndex[id];
+      const entryFresh = entry && modifiedById[id] != null
+        && entry.sourceModified === modifiedById[id] && Array.isArray(entry.tags);
+      if (entryFresh) {
+        convertedTags[id] = entry.tags;
+        let snapshot = null;
+        if (titleById[id] && entry.title !== titleById[id]) {
+          snapshot = readDriveArticleCache_(id);
+          if (snapshot) {
+            writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
+            snapshot.title = titleById[id];
+            console.log(`Snapshot title updated: ${titleById[id]}`);
+          }
+          snapshotIndex[id] = { sourceModified: entry.sourceModified, title: titleById[id], tags: entry.tags };
+          snapshotIndexDirty = true;
+        }
+        if (targetSet.has(id)) {
+          snapshot = snapshot || readDriveArticleCache_(id);
+          if (snapshot) {
+            const payload = JSON.stringify(snapshot);
+            if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
+          }
+        }
+        continue;
+      }
       const snapshot = readDriveArticleCache_(id);
       if (snapshot) {
         // Fresh enough to serve as-is. A rename also moves the
@@ -91,6 +135,7 @@ export const preCacheAll = () => {
           snapshot.title = titleById[id];
           console.log(`Snapshot title updated: ${titleById[id]}`);
         }
+        rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
         if (targetSet.has(id)) {
           const payload = JSON.stringify(snapshot);
@@ -104,6 +149,7 @@ export const preCacheAll = () => {
       const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
       convertedTags[id] = article.tags;
       writeDriveArticleCache_(article);
+      rememberIndex_(id, title, article.tags);
 
       if (JSON.stringify(article).length < CACHE_SIZE_LIMIT) {
         if (targetSet.has(id)) cache.put(id, JSON.stringify(article), CACHE_TTL);
@@ -115,6 +161,17 @@ export const preCacheAll = () => {
       console.error(`Failed to save ID:${id}: ${e.message}`);
     }
   }
+
+  // Drop index entries for articles that left the folder, then
+  // persist the index if anything in this run changed it.
+  const liveIdSet = new Set(allIds);
+  for (const id of Object.keys(snapshotIndex)) {
+    if (!liveIdSet.has(id)) {
+      delete snapshotIndex[id];
+      snapshotIndexDirty = true;
+    }
+  }
+  if (snapshotIndexDirty) writeSnapshotIndex_(snapshotIndex);
 
   pruneOrphanSnapshots_(allIds);
 
@@ -342,8 +399,59 @@ export const writeDriveArticleCache_ = (article) => {
     } else {
       folder.createFile(`${article.id}.json`, payload, MimeType.PLAIN_TEXT);
     }
+    // Keep the snapshot index in step so preCacheAll can check
+    // this article's freshness without downloading the snapshot
+    // again. The index is a hint, never the source of truth, so
+    // a failure here must not fail the snapshot write itself.
+    try {
+      const index = readSnapshotIndex_();
+      index[article.id] = { sourceModified, title: article.title, tags: article.tags };
+      writeSnapshotIndex_(index);
+    } catch (e) { /* index refresh is best-effort */ }
   } catch (e) {
     log_(`Drive article cache write failed (${article.id}): ${e.message}`);
+  }
+};
+
+/** -----------------------------
+ *  Snapshot index: one small JSON file in the article-cache
+ *  folder holding, per article, the stamp/title/tags the
+ *  freshness check needs ({ [docId]: { sourceModified, title,
+ *  tags } }). preCacheAll used to read every snapshot in full
+ *  just to compare stamps — dozens of Drive downloads per run.
+ *  With the index it reads this one small file instead, and
+ *  only opens snapshots it actually has to serve or rebuild.
+ *  The index is a hint, never the source of truth: a missing
+ *  or stale entry falls back to reading the snapshot itself,
+ *  and every snapshot write refreshes its entry.
+ *  ----------------------------- */
+export const SNAPSHOT_INDEX_FILE_NAME = 'index.json';
+
+export const readSnapshotIndex_ = () => {
+  try {
+    const files = getArticleCacheFolder_().getFilesByName(SNAPSHOT_INDEX_FILE_NAME);
+    if (!files.hasNext()) return {};
+    const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+    return data;
+  } catch (e) {
+    log_(`Snapshot index read failed: ${e.message}`);
+    return {};
+  }
+};
+
+export const writeSnapshotIndex_ = (index) => {
+  try {
+    const payload = JSON.stringify(index);
+    const folder = getArticleCacheFolder_();
+    const files = folder.getFilesByName(SNAPSHOT_INDEX_FILE_NAME);
+    if (files.hasNext()) {
+      files.next().setContent(payload);
+    } else {
+      folder.createFile(SNAPSHOT_INDEX_FILE_NAME, payload, MimeType.PLAIN_TEXT);
+    }
+  } catch (e) {
+    log_(`Snapshot index write failed: ${e.message}`);
   }
 };
 
@@ -369,8 +477,9 @@ export const storeConvertedArticle_ = (article, cache) => {
 /**
  * Remove snapshot files whose source Doc is no longer in the
  * article folder (deleted or moved away), so the cache folder
- * only ever holds live articles. tags.json lives in the same
- * folder but is not an article snapshot and is always kept.
+ * only ever holds live articles. tags.json and the snapshot
+ * index live in the same folder but are not article snapshots
+ * and are always kept.
  */
 export const pruneOrphanSnapshots_ = (liveIds) => {
   try {
@@ -381,7 +490,7 @@ export const pruneOrphanSnapshots_ = (liveIds) => {
     while (files.hasNext()) {
       const file = files.next();
       const name = file.getName();
-      if (name === TAGS_FILE_NAME || !name.endsWith('.json')) continue;
+      if (name === TAGS_FILE_NAME || name === SNAPSHOT_INDEX_FILE_NAME || !name.endsWith('.json')) continue;
       if (!live.has(name.slice(0, -'.json'.length))) file.setTrashed(true);
     }
   } catch (e) {
@@ -736,7 +845,14 @@ export const listDocsSortedByTitle_ = (folderId) => {
   const docs = [];
   while (files.hasNext()) {
     const f = files.next();
-    docs.push({ id: f.getId(), title: f.getName() });
+    docs.push({
+      id: f.getId(),
+      title: f.getName(),
+      // The Doc's modified time rides along so preCacheAll can
+      // check snapshot freshness against the snapshot index
+      // without opening every snapshot (see readSnapshotIndex_).
+      modified: typeof f.getLastUpdated === 'function' ? f.getLastUpdated().getTime() : null,
+    });
   }
   return docs.sort((a, b) => b.title.localeCompare(a.title, 'ja'));
 };
