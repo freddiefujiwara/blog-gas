@@ -2528,6 +2528,26 @@ describe('Code.js', () => {
       expect(Code.readSnapshotIndex_()).toEqual({});
     });
 
+    it('writeSnapshotIndex_ collapses duplicate index files into one', () => {
+      const first = makeFile('index.json', '{}');
+      const twin = makeFile('index.json', '{}');
+      const twins = [first, twin];
+      let i = 0;
+      const folder = {
+        getFilesByName: vi.fn(() => ({ hasNext: () => i < twins.length, next: () => twins[i++] })),
+        createFile: vi.fn(),
+      };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: () => ({ hasNext: () => true, next: () => folder }),
+      });
+
+      Code.writeSnapshotIndex_({ 'doc-x': { sourceModified: MODIFIED, title: 'T', tags: [] } });
+
+      expect(first.content).toContain('doc-x');
+      expect(twin.setTrashed).toHaveBeenCalledWith(true);
+      expect(folder.createFile).not.toHaveBeenCalled();
+    });
+
     it('writeDriveArticleCache_ refreshes the snapshot index entry', () => {
       mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
       mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
