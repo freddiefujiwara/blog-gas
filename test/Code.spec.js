@@ -2376,7 +2376,9 @@ describe('Code.js', () => {
       stored.set('doc-x.json', existing);
       Code.writeDriveArticleCache_({ id: 'doc-x', title: 'T2', markdown: 'MD2' });
       expect(existing.setContent).toHaveBeenCalled();
-      expect(cacheFolder.createFile).not.toHaveBeenCalled();
+      // The snapshot itself is overwritten, never recreated (the
+      // snapshot index file is a separate create and is fine).
+      expect(cacheFolder.createFile).not.toHaveBeenCalledWith('doc-x.json', expect.any(String), expect.any(String));
     });
 
     it('readDriveArticleCache_ serves a fresh entry and rejects stale or missing ones', () => {
@@ -2513,6 +2515,68 @@ describe('Code.js', () => {
       expect(saved.sourceModified).toBe(MODIFIED);
     });
 
+    it('snapshot index round-trips and tolerates a corrupt file', () => {
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+
+      expect(Code.readSnapshotIndex_()).toEqual({});
+
+      Code.writeSnapshotIndex_({ 'doc-x': { sourceModified: MODIFIED, title: 'T', tags: ['運営'] } });
+      expect(stored.has('index.json')).toBe(true);
+      expect(Code.readSnapshotIndex_()).toEqual({ 'doc-x': { sourceModified: MODIFIED, title: 'T', tags: ['運営'] } });
+
+      stored.set('index.json', makeFile('index.json', '{not json'));
+      expect(Code.readSnapshotIndex_()).toEqual({});
+    });
+
+    it('writeDriveArticleCache_ refreshes the snapshot index entry', () => {
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.writeDriveArticleCache_({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'] });
+
+      const index = JSON.parse(stored.get('index.json').content);
+      expect(index['doc-x']).toEqual({ sourceModified: MODIFIED, title: 'T', tags: ['運営'] });
+    });
+
+    it('preCacheAll trusts a fresh index entry without opening the snapshot or the Doc', () => {
+      const docFile = { getId: () => 'doc-x', getName: () => 'Doc X', getLastUpdated: () => new Date(MODIFIED) };
+      stored.set('index.json', makeFile('index.json', JSON.stringify({ 'doc-x': { sourceModified: MODIFIED, title: 'Doc X', tags: ['運営'] } })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      mockDocumentApp.openById.mockImplementation(() => emptyBodyDoc('Doc X'));
+
+      Code.preCacheAll();
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      const tagsCall = mockCache.put.mock.calls.find((c) => c[0] === 'tags');
+      expect(tagsCall).toBeDefined();
+      expect(JSON.parse(tagsCall[1])['doc-x']).toEqual(['運営']);
+    });
+
+    it('preCacheAll drops index entries for articles that left the folder', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify({ 'gone-id': { sourceModified: MODIFIED, title: 'Gone', tags: [] } })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+
+      Code.preCacheAll();
+
+      expect(JSON.parse(stored.get('index.json').content)).toEqual({});
+    });
+
+    it('pruneOrphanSnapshots_ keeps the snapshot index file', () => {
+      const indexFile = { getName: () => 'index.json', setTrashed: vi.fn() };
+      const files = [indexFile];
+      let i = 0;
+      const folder = { getFiles: () => ({ hasNext: () => i < files.length, next: () => files[i++] }) };
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFoldersByName: () => ({ hasNext: () => true, next: () => folder }),
+      });
+
+      Code.pruneOrphanSnapshots_([]);
+
+      expect(indexFile.setTrashed).not.toHaveBeenCalled();
+    });
+
     it('preCacheAll creates snapshots for articles outside the hot set too', () => {
       const files = [];
       for (let i = 0; i < Code.PRE_CACHE_LIMIT + 2; i++) {
@@ -2524,7 +2588,9 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 2);
+      // One stored file per article, plus the snapshot index.
+      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 3);
+      expect(stored.has('index.json')).toBe(true);
       const docPuts = mockCache.put.mock.calls.filter((c) => String(c[0]).startsWith('id'));
       expect(docPuts).toHaveLength(Code.PRE_CACHE_LIMIT);
     });
