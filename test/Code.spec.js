@@ -2468,12 +2468,29 @@ describe('Code.js', () => {
     it('doGet serves a small article from a fresh Drive snapshot without opening the Doc', () => {
       stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'], sourceModified: MODIFIED })));
       mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
-      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      mockDriveApp.getFileById.mockReturnValue(fullFile('Doc X'));
 
       Code.doGet({ parameter: { id: 'doc-x' } });
 
       expect(mockDocumentApp.openById).not.toHaveBeenCalled();
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"markdown":"MD"'));
+    });
+
+    it('doGet refuses a snapshot whose Doc was moved out of the blog folder', () => {
+      stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: 'T', markdown: 'MD', tags: ['運営'], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+      mockDriveApp.getFileById.mockReturnValue({
+        getLastUpdated: () => new Date(MODIFIED),
+        getMimeType: () => mockMimeType.GOOGLE_DOCS,
+        getParents: () => ({ hasNext: () => true, next: () => ({ getId: () => 'some-other-folder' }) }),
+        getName: () => 'Doc X',
+      });
+
+      Code.doGet({ parameter: { id: 'doc-x' } });
+
+      expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('Document not found'));
+      expect(mockContentService.createTextOutput).not.toHaveBeenCalledWith(expect.stringContaining('"markdown":"MD"'));
     });
 
     it('doGet reconverts a stale snapshot and overwrites it', () => {
