@@ -826,6 +826,13 @@ export const doGet = (e) => {
     return json_({ ids: allIds, titles, article_cache: articleCache, tags });
   }
 
+  // Membership first: both caches below are keyed by document id alone,
+  // so a document moved out of the blog folder would keep being served
+  // from its cached copy. Verify the document still lives in the folder
+  // before trusting any cache.
+  const info = getDocInfoInFolder_(getConfig_().folderId, docId);
+  if (!info.exists) return jsonError_('Document not found');
+
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
     // Payloads cached before article tags existed carry no tags
@@ -848,9 +855,6 @@ export const doGet = (e) => {
   }
 
   log_(`Document (ID:${docId}) not in cache. Generating...`);
-  const info = getDocInfoInFolder_(getConfig_().folderId, docId);
-  if (!info.exists) return jsonError_('Document not found');
-
   const doc = DocumentApp.openById(docId);
   const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
   storeConvertedArticle_(article, cache);
@@ -889,7 +893,9 @@ export const getDocInfoInFolder_ = (folderId, fileId) => {
     const file = DriveApp.getFileById(fileId);
     if (file.getMimeType() === MimeType.GOOGLE_DOCS) {
       const parents = file.getParents();
-      while (parents.hasNext()) {
+      // A file lives in a handful of folders at most; the cap only
+      // guards against a pathological parent iterator.
+      for (let depth = 0; depth < 10 && parents.hasNext(); depth++) {
         if (parents.next().getId() === folderId) {
           return { exists: true, title: file.getName() };
         }
