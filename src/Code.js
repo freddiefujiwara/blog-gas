@@ -1079,6 +1079,53 @@ export const parseOgData_ = (html, pageUrl) => {
   return { title, image, description };
 };
 
+/** -----------------------------
+ *  Charset-aware body decoding (ported from ogp-api-gas): the
+ *  direct-fetch tier must decode pages with the charset the page
+ *  itself declares (HTTP header first, then the meta tag).
+ *  Rakuten item pages are Shift_JIS without a header charset, and
+ *  UrlFetch's getContentText() decodes them as UTF-8, which garbles
+ *  every Japanese title and description (seen 2026-11-06, and again
+ *  2026-11-16 while the OGP API tier was unreachable).
+ *  ----------------------------- */
+export const normalizeCharset_ = (raw) => {
+  const s = String(raw || '').toLowerCase();
+  if (!s) return null;
+  if (s.includes('shift_jis') || s.includes('shift-jis') || s.includes('sjis') || s.includes('windows-31j') || s.includes('x-sjis')) return 'Shift_JIS';
+  if (s.includes('euc-jp') || s.includes('eucjp')) return 'EUC-JP';
+  if (s.includes('iso-2022-jp')) return 'ISO-2022-JP';
+  if (s.includes('utf-8') || s.includes('utf8')) return 'UTF-8';
+  return null;
+};
+
+export const sniffCharset_ = (headText) => {
+  const m = String(headText || '').match(/charset\s*=\s*["']?\s*([a-zA-Z0-9._-]+)/i);
+  return m ? normalizeCharset_(m[1]) : null;
+};
+
+export const headerCharset_ = (res) => {
+  try {
+    const headers = (res && res.getHeaders && res.getHeaders()) || {};
+    return normalizeCharset_(headers['Content-Type'] || headers['content-type'] || '');
+  } catch (e) {
+    return null;
+  }
+};
+
+export const decodeBody_ = (blob, headerCharset) => {
+  try {
+    let charset = normalizeCharset_(headerCharset) || null;
+    if (!charset) {
+      let probe = '';
+      try { probe = blob.getDataAsString('UTF-8').slice(0, OG_SCAN_LIMIT); } catch (e) { /* ignore */ }
+      charset = sniffCharset_(probe);
+    }
+    return blob.getDataAsString(charset || 'UTF-8');
+  } catch (e) {
+    try { return blob.getDataAsString('UTF-8'); } catch (e2) { return ''; }
+  }
+};
+
 export const resolveOgData_ = (urls) => {
   const result = {};
   try {
@@ -1187,7 +1234,7 @@ export const resolveOgData_ = (urls) => {
         try {
           const res = responses[i];
           if (res && res.getResponseCode() >= 200 && res.getResponseCode() < 300) {
-            data = parseOgData_(res.getContentText(), url);
+            data = parseOgData_(decodeBody_(res.getBlob(), headerCharset_(res)), url);
             if (data && !data.title && !data.image) log_(`OG no data: ${url}`);
           } else if (res) {
             log_(`OG fetch status ${res.getResponseCode()}: ${url}`);

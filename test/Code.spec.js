@@ -1559,6 +1559,54 @@ describe('Code.js', () => {
       });
     });
 
+
+    describe('charset handling', () => {
+      const blobOf = (byCharset) => ({
+        getDataAsString: vi.fn((cs) => byCharset[cs] ?? byCharset['UTF-8'] ?? ''),
+      });
+
+      it('normalizes common charset names', () => {
+        expect(Code.normalizeCharset_('Shift_JIS')).toBe('Shift_JIS');
+        expect(Code.normalizeCharset_('text/html; charset=windows-31j')).toBe('Shift_JIS');
+        expect(Code.normalizeCharset_('EUC-JP')).toBe('EUC-JP');
+        expect(Code.normalizeCharset_('utf8')).toBe('UTF-8');
+        expect(Code.normalizeCharset_('')).toBeNull();
+        expect(Code.normalizeCharset_('unknown-xyz')).toBeNull();
+      });
+
+      it('sniffs the charset from a meta tag', () => {
+        expect(Code.sniffCharset_('<meta charset="Shift_JIS">')).toBe('Shift_JIS');
+        expect(Code.sniffCharset_('<meta http-equiv="Content-Type" content="text/html; charset=EUC-JP">')).toBe('EUC-JP');
+        expect(Code.sniffCharset_('<title>no meta</title>')).toBeNull();
+      });
+
+      it('decodeBody_ decodes with the meta charset when the header has none', () => {
+        const sjisText = '<html><head><meta charset="Shift_JIS"><meta property="og:title" content="正しい題名"></head></html>';
+        const blob = blobOf({ 'UTF-8': '<html><head><meta charset="Shift_JIS"></head></html>', 'Shift_JIS': sjisText });
+        const decoded = Code.decodeBody_(blob, '');
+        expect(blob.getDataAsString).toHaveBeenCalledWith('Shift_JIS');
+        expect(decoded).toContain('正しい題名');
+      });
+
+      it('decodeBody_ prefers the HTTP header charset over the meta tag', () => {
+        const blob = blobOf({ 'UTF-8': '<html><head><meta charset="Shift_JIS"></head></html>' });
+        Code.decodeBody_(blob, 'text/html; charset=UTF-8');
+        expect(blob.getDataAsString).toHaveBeenCalledTimes(1);
+        expect(blob.getDataAsString).toHaveBeenCalledWith('UTF-8');
+      });
+
+      it('decodes a Shift_JIS page end to end in resolveOgData_', () => {
+        const sjisHtml = '<html><head><meta charset="Shift_JIS"><meta property="og:title" content="楽天の商品名"><meta property="og:image" content="https://example.com/i.jpg"></head></html>';
+        mockUrlFetchApp.fetchAll.mockReturnValue([{
+          getResponseCode: () => 200,
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: (cs) => (cs === 'Shift_JIS' ? sjisHtml : '<html><head><meta charset="Shift_JIS"></head></html>') }),
+        }]);
+        const result = Code.resolveOgData_([URL_A]);
+        expect(result[URL_A].title).toBe('楽天の商品名');
+      });
+    });
+
     describe('resolveOgData_', () => {
       beforeEach(() => {
         mockCache.getAll.mockReturnValue({});
@@ -1582,6 +1630,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         }]);
         const result = Code.resolveOgData_([URL_A]);
         expect(result[URL_A].title).toBe('Example Title');
@@ -1618,7 +1668,7 @@ describe('Code.js', () => {
       it('treats an unreadable response body as no data', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
-          getContentText: () => { throw new Error('text content too long'); },
+          getBlob: () => { throw new Error('blob unavailable'); },
         }]);
         const result = Code.resolveOgData_([URL_A]);
         expect(result[URL_A]).toBeUndefined();
@@ -1634,6 +1684,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetch.mockReturnValue({
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         });
         const result = Code.resolveOgData_([URL_A]);
         expect(result[URL_A].title).toBe('Example Title');
@@ -1653,6 +1705,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
           getContentText: () => '<html><head></head><body>plain</body></html>',
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => '<html><head></head><body>plain</body></html>' }),
         }]);
         expect(Code.resolveOgData_([URL_A])).toEqual({});
         expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('OG no data'));
@@ -1663,6 +1717,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockImplementation((requests) => requests.map(() => ({
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         })));
         const result = Code.resolveOgData_(urls);
         expect(mockUrlFetchApp.fetchAll).toHaveBeenCalledTimes(2);
@@ -1680,6 +1736,8 @@ describe('Code.js', () => {
           return requests.map(() => ({
             getResponseCode: () => 200,
             getContentText: () => ogHtml(),
+            getHeaders: () => ({}),
+            getBlob: () => ({ getDataAsString: () => ogHtml() }),
           }));
         });
         mockUrlFetchApp.fetch.mockReturnValue({
@@ -1888,6 +1946,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         }]);
         const result = Code.resolveOgData_([URL_A]);
         expect(result[URL_A].title).toBe('Example Title');
@@ -1984,6 +2044,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         }]);
         expect(Code.resolveOgData_([URL_A])[URL_A].title).toBe('Example Title');
       });
@@ -1993,6 +2055,8 @@ describe('Code.js', () => {
         mockUrlFetchApp.fetchAll.mockReturnValue([{
           getResponseCode: () => 200,
           getContentText: () => ogHtml(),
+          getHeaders: () => ({}),
+          getBlob: () => ({ getDataAsString: () => ogHtml() }),
         }]);
         expect(Code.resolveOgData_([URL_A])[URL_A].title).toBe('Example Title');
       });
@@ -2325,7 +2389,7 @@ describe('Code.js', () => {
       mockUrlFetchApp.fetchAll.mockImplementation((requests) => {
         call += 1;
         if (call === 1) return [{ getResponseCode: () => 500, getContentText: () => 'err' }];
-        return requests.map(() => ({ getResponseCode: () => 200, getContentText: () => ogHtml() }));
+        return requests.map(() => ({ getResponseCode: () => 200, getContentText: () => ogHtml(), getHeaders: () => ({}), getBlob: () => ({ getDataAsString: () => ogHtml() }) }));
       });
       const result = Code.resolveOgData_([URL_A]);
       expect(result[URL_A].title).toBe('Example Title');
