@@ -38,13 +38,12 @@ export const preCacheAll = () => {
   const allIds = docs.map((d) => d.id);
   const listPayload = JSON.stringify(allIds);
 
+  const titles = titlesById_(docs);
   try {
     if (listPayload.length < CACHE_SIZE_LIMIT) {
       cache.put('0', listPayload, CACHE_TTL);
       console.log('List saved');
     }
-    const titles = {};
-    docs.forEach((d) => { titles[d.id] = d.title; });
     const titlesPayload = JSON.stringify(titles);
     if (titlesPayload.length < CACHE_SIZE_LIMIT) {
       cache.put('titles', titlesPayload, CACHE_TTL);
@@ -69,8 +68,7 @@ export const preCacheAll = () => {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
   }
   const targetSet = new Set(targetIds);
-  const titleById = {};
-  docs.forEach((d) => { titleById[d.id] = d.title; });
+  const titleById = titles;
 
   // Hot-set articles convert unconditionally (they are few); the
   // remaining articles share the snapshot time budget, so one run
@@ -91,6 +89,16 @@ export const preCacheAll = () => {
   docs.forEach((d) => { modifiedById[d.id] = d.modified; });
   const snapshotIndex = readSnapshotIndex_();
   let snapshotIndexDirty = false;
+  // A rename also moves the Doc's modified time (forcing a
+  // reconversion), but patch a drifted snapshot title in place as
+  // well so it never has to wait for one.
+  const patchSnapshotTitle_ = (snapshot, id) => {
+    if (titleById[id] && snapshot.title !== titleById[id]) {
+      writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
+      snapshot.title = titleById[id];
+      console.log(`Snapshot title updated: ${titleById[id]}`);
+    }
+  };
   const rememberIndex_ = (id, title, tags) => {
     if (modifiedById[id] == null) return;
     snapshotIndex[id] = { sourceModified: modifiedById[id], title, tags };
@@ -107,11 +115,7 @@ export const preCacheAll = () => {
         let snapshot = null;
         if (titleById[id] && entry.title !== titleById[id]) {
           snapshot = readDriveArticleCache_(id);
-          if (snapshot) {
-            writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
-            snapshot.title = titleById[id];
-            console.log(`Snapshot title updated: ${titleById[id]}`);
-          }
+          if (snapshot) patchSnapshotTitle_(snapshot, id);
           snapshotIndex[id] = { sourceModified: entry.sourceModified, title: titleById[id], tags: entry.tags };
           snapshotIndexDirty = true;
         }
@@ -126,15 +130,8 @@ export const preCacheAll = () => {
       }
       const snapshot = readDriveArticleCache_(id);
       if (snapshot) {
-        // Fresh enough to serve as-is. A rename also moves the
-        // Doc's modified time (forcing a reconversion), but patch a
-        // drifted title in place as well so it never has to wait
-        // for one.
-        if (titleById[id] && snapshot.title !== titleById[id]) {
-          writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
-          snapshot.title = titleById[id];
-          console.log(`Snapshot title updated: ${titleById[id]}`);
-        }
+        // Fresh enough to serve as-is.
+        patchSnapshotTitle_(snapshot, id);
         rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
         if (targetSet.has(id)) {
@@ -427,18 +424,23 @@ export const writeDriveArticleCache_ = (article) => {
  *  ----------------------------- */
 export const SNAPSHOT_INDEX_FILE_NAME = 'index.json';
 
-export const readSnapshotIndex_ = () => {
+// Reads and parses a JSON file kept in the article-cache folder.
+// Returns `fallback` when the file is missing, unreadable, or not
+// a plain object.
+export const readJsonFile_ = (fileName, fallback, logLabel) => {
   try {
-    const files = getArticleCacheFolder_().getFilesByName(SNAPSHOT_INDEX_FILE_NAME);
-    if (!files.hasNext()) return {};
+    const files = getArticleCacheFolder_().getFilesByName(fileName);
+    if (!files.hasNext()) return fallback;
     const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return {};
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return fallback;
     return data;
   } catch (e) {
-    log_(`Snapshot index read failed: ${e.message}`);
-    return {};
+    log_(`${logLabel} read failed: ${e.message}`);
+    return fallback;
   }
 };
+
+export const readSnapshotIndex_ = () => readJsonFile_(SNAPSHOT_INDEX_FILE_NAME, {}, 'Snapshot index');
 
 export const writeSnapshotIndex_ = (index) => {
   try {
@@ -531,18 +533,7 @@ export const pruneOrphanSnapshots_ = (liveIds) => {
  *  ----------------------------- */
 export const TAGS_FILE_NAME = 'tags.json';
 
-export const readDriveTagsMap_ = () => {
-  try {
-    const files = getArticleCacheFolder_().getFilesByName(TAGS_FILE_NAME);
-    if (!files.hasNext()) return null;
-    const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
-    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
-    return data;
-  } catch (e) {
-    log_(`Drive tags map read failed: ${e.message}`);
-    return null;
-  }
-};
+export const readDriveTagsMap_ = () => readJsonFile_(TAGS_FILE_NAME, null, 'Drive tags map');
 
 export const writeDriveTagsMap_ = (tags) => {
   try {
@@ -682,14 +673,6 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
 };
 
 /**
- * The tags map for responses: the preCacheAll-warmed CacheService
- * entry when present, otherwise the persistent Drive copy
- * preCacheAll saved alongside it (which also re-warms the cache),
- * otherwise a request-time build. scanDocs=false keeps the
- * lightweight titles variant from opening any Doc; ids no source
- * can resolve then map to [] until the warmer runs.
- */
-/**
  * Music player tracks: a paragraph of the exact form
  * [[音楽|タイトル|音源ファイル名.mp3]] declares one track of the
  * article's embedded player. (The marker was [[music|...]] until
@@ -698,13 +681,13 @@ export const buildTagsMap_ = (ids, cache, { scanDocs = true } = {}) => {
  * Conversion turns each marker into a
  * placeholder <div class="music-track"> that the front-end collects
  * (in document order) into a single playlist. Fields are
- * pipe-separated because titles may contain colons. The audio file
- * itself is served by the blog (public/audio/), so the third field
+ * pipe-separated because titles may contain colons. The third field
  * is a plain file name restricted to [A-Za-z0-9_-] plus the .mp3
- * suffix — no directories, so it can never point outside /audio/.
- * (Drive direct-download links are not usable here: they answer
- * with Content-Disposition: attachment, which browsers refuse to
- * play in an <audio> element.)
+ * suffix — no directories. The front-end resolves the file name to
+ * a playable stream through the podcast feed music-gas publishes
+ * from the same track sheet. (Drive direct-download links are not
+ * usable for playback: they answer with Content-Disposition:
+ * attachment, which browsers refuse to play in an <audio> element.)
  */
 export const parseMusicMarker_ = (text) => {
   if (typeof text !== 'string') return null;
@@ -727,6 +710,14 @@ export const musicMarkerFromElement_ = (el) => {
 export const musicTrackMarkdown_ = (track) =>
   `<div class="music-track" data-title="${escapeXml_(track.title)}" data-file="${track.file}"></div>`;
 
+/**
+ * The tags map for responses: the preCacheAll-warmed CacheService
+ * entry when present, otherwise the persistent Drive copy
+ * preCacheAll saved alongside it (which also re-warms the cache),
+ * otherwise a request-time build. scanDocs=false keeps the
+ * lightweight titles variant from opening any Doc; ids no source
+ * can resolve then map to [] until the warmer runs.
+ */
 export const getTagsMap_ = (ids, cache, options) => {
   const cached = cache.get(TAGS_CACHE_KEY);
   if (cached) {
@@ -776,8 +767,7 @@ export const doGet = (e) => {
       return json_({ ids, titles: JSON.parse(cachedTitles), tags: getTagsMap_(ids, cache, { scanDocs: false }) });
     }
     const docs = listDocsSortedByTitle_(getConfig_().folderId);
-    const titles = {};
-    docs.forEach((d) => { titles[d.id] = d.title; });
+    const titles = titlesById_(docs);
     const ids = docs.map((d) => d.id);
     return json_({ ids, titles, tags: getTagsMap_(ids, cache, { scanDocs: false }) });
   }
@@ -795,8 +785,7 @@ export const doGet = (e) => {
       // search over every article, not just the pre-cached few.
       const docs = listDocsSortedByTitle_(getConfig_().folderId);
       allIds = docs.map((d) => d.id);
-      titles = {};
-      docs.forEach((d) => { titles[d.id] = d.title; });
+      titles = titlesById_(docs);
     }
     if (!cachedList) log_('List not in cache. Getting from Drive');
 
@@ -864,6 +853,13 @@ export const doGet = (e) => {
 /** -----------------------------
  *  List: Docs IDs (sorted)
  *  ----------------------------- */
+// Builds the { docId: title } map the list and titles responses serve.
+export const titlesById_ = (docs) => {
+  const titles = {};
+  docs.forEach((d) => { titles[d.id] = d.title; });
+  return titles;
+};
+
 export const listDocsSortedByTitle_ = (folderId) => {
   const files = DriveApp.getFolderById(folderId).getFilesByType(MimeType.GOOGLE_DOCS);
   const docs = [];
