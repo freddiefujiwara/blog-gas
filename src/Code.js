@@ -16,6 +16,8 @@ export const getConfig_ = () => {
     siteDescription: props.getProperty('SITE_DESCRIPTION') || 'Recent articles',
   };
 };
+// One script property as a string ('' when unset).
+const scriptProperty_ = (name) => String(PropertiesService.getScriptProperties().getProperty(name) || '');
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
@@ -34,7 +36,8 @@ export const preCacheAll = () => {
   console.log('Logs cleared');
 
   const cache = CacheService.getScriptCache();
-  const docs = listDocsSortedByTitle_(getConfig_().folderId);
+  const config = getConfig_();
+  const docs = listDocsSortedByTitle_(config.folderId);
   const allIds = docs.map((d) => d.id);
   const listPayload = JSON.stringify(allIds);
 
@@ -64,11 +67,10 @@ export const preCacheAll = () => {
   // treatment (every article gets a snapshot now); they are simply
   // converted first.
   const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
-  for (const id of getConfig_().pinnedIds) {
+  for (const id of config.pinnedIds) {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
   }
   const targetSet = new Set(targetIds);
-  const titleById = titles;
 
   // Hot-set articles convert unconditionally (they are few); the
   // remaining articles share the snapshot time budget, so one run
@@ -93,11 +95,17 @@ export const preCacheAll = () => {
   // reconversion), but patch a drifted snapshot title in place as
   // well so it never has to wait for one.
   const patchSnapshotTitle_ = (snapshot, id) => {
-    if (titleById[id] && snapshot.title !== titleById[id]) {
-      writeDriveArticleCache_({ ...snapshot, title: titleById[id] });
-      snapshot.title = titleById[id];
-      console.log(`Snapshot title updated: ${titleById[id]}`);
+    if (titles[id] && snapshot.title !== titles[id]) {
+      writeDriveArticleCache_({ ...snapshot, title: titles[id] });
+      snapshot.title = titles[id];
+      console.log(`Snapshot title updated: ${titles[id]}`);
     }
+  };
+  // Serve a snapshot through the hot CacheService layer when it fits.
+  const warmHotCache_ = (id, snapshot) => {
+    if (!snapshot) return;
+    const payload = JSON.stringify(snapshot);
+    if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
   };
   const rememberIndex_ = (id, title, tags) => {
     if (modifiedById[id] == null) return;
@@ -113,18 +121,16 @@ export const preCacheAll = () => {
       if (entryFresh) {
         convertedTags[id] = entry.tags;
         let snapshot = null;
-        if (titleById[id] && entry.title !== titleById[id]) {
+        if (titles[id] && entry.title !== titles[id]) {
           snapshot = readDriveArticleCache_(id);
           if (snapshot) patchSnapshotTitle_(snapshot, id);
-          snapshotIndex[id] = { sourceModified: entry.sourceModified, title: titleById[id], tags: entry.tags };
-          snapshotIndexDirty = true;
+          // entryFresh means entry.sourceModified === modifiedById[id],
+          // so rememberIndex_ writes exactly the entry being refreshed.
+          rememberIndex_(id, titles[id], entry.tags);
         }
         if (targetSet.has(id)) {
           snapshot = snapshot || readDriveArticleCache_(id);
-          if (snapshot) {
-            const payload = JSON.stringify(snapshot);
-            if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
-          }
+          warmHotCache_(id, snapshot);
         }
         continue;
       }
@@ -134,10 +140,7 @@ export const preCacheAll = () => {
         patchSnapshotTitle_(snapshot, id);
         rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
-        if (targetSet.has(id)) {
-          const payload = JSON.stringify(snapshot);
-          if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
-        }
+        if (targetSet.has(id)) warmHotCache_(id, snapshot);
         continue;
       }
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
@@ -148,8 +151,9 @@ export const preCacheAll = () => {
       writeDriveArticleCache_(article);
       rememberIndex_(id, title, article.tags);
 
-      if (JSON.stringify(article).length < CACHE_SIZE_LIMIT) {
-        if (targetSet.has(id)) cache.put(id, JSON.stringify(article), CACHE_TTL);
+      const articlePayload = JSON.stringify(article);
+      if (articlePayload.length < CACHE_SIZE_LIMIT) {
+        if (targetSet.has(id)) cache.put(id, articlePayload, CACHE_TTL);
         console.log(`Saved: ${title}`);
       } else {
         console.log(`Saved to Drive cache: ${title}`);
@@ -244,8 +248,9 @@ export const refreshArticleSnapshot = (docId) => {
 export const dailyRSSCache = () => {
   try {
     const cache = CacheService.getScriptCache();
+    const config = getConfig_();
     const cachedList = cache.get('0');
-    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(getConfig_().folderId);
+    const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(config.folderId);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
     const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
@@ -265,7 +270,7 @@ export const dailyRSSCache = () => {
       const item = {
         id: article.id,
         title: article.title,
-        url: `${getConfig_().siteUrl}/${article.id}`,
+        url: `${config.siteUrl}/${article.id}`,
         content: article.markdown,
       };
       if (getByteLength_(JSON.stringify(item)) > 9000) {
@@ -389,13 +394,7 @@ export const writeDriveArticleCache_ = (article) => {
   try {
     const sourceModified = DriveApp.getFileById(article.id).getLastUpdated().getTime();
     const payload = JSON.stringify({ ...article, sourceModified });
-    const folder = getArticleCacheFolder_();
-    const files = folder.getFilesByName(`${article.id}.json`);
-    if (files.hasNext()) {
-      files.next().setContent(payload);
-    } else {
-      folder.createFile(`${article.id}.json`, payload, MimeType.PLAIN_TEXT);
-    }
+    writeJsonFile_(`${article.id}.json`, payload);
     // Keep the snapshot index in step so preCacheAll can check
     // this article's freshness without downloading the snapshot
     // again. The index is a hint, never the source of truth, so
@@ -423,6 +422,18 @@ export const writeDriveArticleCache_ = (article) => {
  *  and every snapshot write refreshes its entry.
  *  ----------------------------- */
 export const SNAPSHOT_INDEX_FILE_NAME = 'index.json';
+
+// Writes a JSON file kept in the article-cache folder, replacing
+// the first copy found or creating the file when absent.
+export const writeJsonFile_ = (fileName, payload) => {
+  const folder = getArticleCacheFolder_();
+  const files = folder.getFilesByName(fileName);
+  if (files.hasNext()) {
+    files.next().setContent(payload);
+  } else {
+    folder.createFile(fileName, payload, MimeType.PLAIN_TEXT);
+  }
+};
 
 // Reads and parses a JSON file kept in the article-cache folder.
 // Returns `fallback` when the file is missing, unreadable, or not
@@ -537,14 +548,7 @@ export const readDriveTagsMap_ = () => readJsonFile_(TAGS_FILE_NAME, null, 'Driv
 
 export const writeDriveTagsMap_ = (tags) => {
   try {
-    const payload = JSON.stringify(tags);
-    const folder = getArticleCacheFolder_();
-    const files = folder.getFilesByName(TAGS_FILE_NAME);
-    if (files.hasNext()) {
-      files.next().setContent(payload);
-    } else {
-      folder.createFile(TAGS_FILE_NAME, payload, MimeType.PLAIN_TEXT);
-    }
+    writeJsonFile_(TAGS_FILE_NAME, JSON.stringify(tags));
   } catch (e) {
     log_(`Drive tags map write failed: ${e.message}`);
   }
@@ -592,14 +596,19 @@ export const paragraphPlainText_ = (p) => {
   return text;
 };
 
-export const isTagMarkerElement_ = (el) => {
+// Shared shape of the marker-paragraph checks below (tag, music,
+// grayout): a marker is a paragraph whose plain text parses with
+// the given parser; anything else — or any error — is not a marker.
+const markerFromElement_ = (el, parse) => {
   try {
-    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
-    return parseTagMarker_(paragraphPlainText_(el.asParagraph())) !== null;
+    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return null;
+    return parse(paragraphPlainText_(el.asParagraph()));
   } catch (e) {
-    return false;
+    return null;
   }
 };
+
+export const isTagMarkerElement_ = (el) => markerFromElement_(el, parseTagMarker_) !== null;
 
 /**
  * Tags of a Doc: the first tag marker paragraph anywhere in the
@@ -698,14 +707,7 @@ export const parseMusicMarker_ = (text) => {
   return { title, file: m[2] };
 };
 
-export const musicMarkerFromElement_ = (el) => {
-  try {
-    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return null;
-    return parseMusicMarker_(paragraphPlainText_(el.asParagraph()));
-  } catch (e) {
-    return null;
-  }
-};
+export const musicMarkerFromElement_ = (el) => markerFromElement_(el, parseMusicMarker_);
 
 export const musicTrackMarkdown_ = (track) =>
   `<div class="music-track" data-title="${escapeXml_(track.title)}" data-file="${track.file}"></div>`;
@@ -747,6 +749,25 @@ export const getTagsMap_ = (ids, cache, options) => {
 };
 
 /**
+ * The article id list and titles map for the list/titles
+ * responses: the preCacheAll-warmed cache entries when both are
+ * present, otherwise a live folder listing. Titles travel with
+ * the id list so clients can offer title search over every
+ * article, not just the pre-cached few. `listCached` reports
+ * whether the id list itself was cached (the list handler logs
+ * on a miss).
+ */
+export const listIdsAndTitles_ = (cache) => {
+  const cachedList = cache.get('0');
+  const cachedTitles = cache.get('titles');
+  if (cachedList && cachedTitles) {
+    return { ids: JSON.parse(cachedList), titles: JSON.parse(cachedTitles), listCached: true };
+  }
+  const docs = listDocsSortedByTitle_(getConfig_().folderId);
+  return { ids: docs.map((d) => d.id), titles: titlesById_(docs), listCached: Boolean(cachedList) };
+};
+
+/**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
  */
@@ -755,39 +776,19 @@ export const doGet = (e) => {
   if (output === 'rss') return generateRSSResponse_();
 
   const cache = CacheService.getScriptCache();
+  const config = getConfig_();
 
   // Lightweight variant for title search and the latest-article link:
   // ids and titles only, never any article bodies, so it stays fast
   // even when the article cache is cold.
   if (output === 'titles') {
-    const cachedList = cache.get('0');
-    const cachedTitles = cache.get('titles');
-    if (cachedList && cachedTitles) {
-      const ids = JSON.parse(cachedList);
-      return json_({ ids, titles: JSON.parse(cachedTitles), tags: getTagsMap_(ids, cache, { scanDocs: false }) });
-    }
-    const docs = listDocsSortedByTitle_(getConfig_().folderId);
-    const titles = titlesById_(docs);
-    const ids = docs.map((d) => d.id);
+    const { ids, titles } = listIdsAndTitles_(cache);
     return json_({ ids, titles, tags: getTagsMap_(ids, cache, { scanDocs: false }) });
   }
 
   if (!docId) {
-    const cachedList = cache.get('0');
-    const cachedTitles = cache.get('titles');
-    let allIds;
-    let titles;
-    if (cachedList && cachedTitles) {
-      allIds = JSON.parse(cachedList);
-      titles = JSON.parse(cachedTitles);
-    } else {
-      // Titles travel with the id list so clients can offer title
-      // search over every article, not just the pre-cached few.
-      const docs = listDocsSortedByTitle_(getConfig_().folderId);
-      allIds = docs.map((d) => d.id);
-      titles = titlesById_(docs);
-    }
-    if (!cachedList) log_('List not in cache. Getting from Drive');
+    const { ids: allIds, titles, listCached } = listIdsAndTitles_(cache);
+    if (!listCached) log_('List not in cache. Getting from Drive');
 
     const tags = getTagsMap_(allIds, cache, { scanDocs: true });
 
@@ -799,7 +800,7 @@ export const doGet = (e) => {
       if (driveCached) return driveCached;
       log_(`Article (ID:${id}) not in cache. Fetching...`);
       try {
-        const info = getDocInfoInFolder_(getConfig_().folderId, id);
+        const info = getDocInfoInFolder_(config.folderId, id);
         if (info.exists) {
           const doc = DocumentApp.openById(id);
           const article = { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
@@ -819,7 +820,7 @@ export const doGet = (e) => {
   // so a document moved out of the blog folder would keep being served
   // from its cached copy. Verify the document still lives in the folder
   // before trusting any cache.
-  const info = getDocInfoInFolder_(getConfig_().folderId, docId);
+  const info = getDocInfoInFolder_(config.folderId, docId);
   if (!info.exists) return jsonError_('Document not found');
 
   const cachedDoc = cache.get(docId);
@@ -916,10 +917,13 @@ export const getImageFolder_ = () => {
 
 export const imageUrl_ = (fileId) => `https://lh3.googleusercontent.com/d/${fileId}`;
 
+// MD5 of a byte array as a lowercase hex string.
+const md5Hex_ = (bytes) => Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, bytes)
+  .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+
 export const exportInlineImage_ = (image) => {
   const blob = image.getBlob();
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, blob.getBytes())
-    .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+  const digest = md5Hex_(blob.getBytes());
   const ext = ({ 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' })[blob.getContentType()] || 'png';
   const name = `img-${digest}.${ext}`;
   const folder = getImageFolder_();
@@ -981,8 +985,7 @@ let ogDataByUrl_ = {};
 let grayoutCardUrls_ = {};
 
 export const ogCacheKey_ = (url) => {
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, Utilities.newBlob(url).getBytes())
-    .map((b) => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+  const digest = md5Hex_(Utilities.newBlob(url).getBytes());
   // Generation "v3" (2026-11-07): the OGP API changed the list-card
   // shape (short product name as the title, price + properties as the
   // description), so v2 entries — full-length titles, some with item
@@ -990,6 +993,15 @@ export const ogCacheKey_ = (url) => {
   // and expire on their own. All reads/writes now go through this
   // key, so the next conversion rebuilds every card via the API tier.
   return `og:v3:${digest}`;
+};
+
+// The attribute-run boundaries of a text element, extended to
+// cover the whole text so callers can walk [start, end) runs.
+const attributeBoundaries_ = (textEl, length) => {
+  const indices = textEl.getTextAttributeIndices() || [];
+  if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
+  if (indices[indices.length - 1] !== length) indices.push(length);
+  return indices;
 };
 
 export const standaloneLinkUrl_ = (p) => {
@@ -1003,9 +1015,7 @@ export const standaloneLinkUrl_ = (p) => {
     const fullText = textEl.getText() || '';
     if (!fullText) continue;
     text += fullText;
-    const indices = textEl.getTextAttributeIndices() || [];
-    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
-    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
+    const indices = attributeBoundaries_(textEl, fullText.length);
     for (let k = 0; k < indices.length - 1; k++) {
       const start = indices[k];
       const end = indices[k + 1];
@@ -1131,6 +1141,9 @@ export const resolveOgData_ = (urls) => {
   try {
     if (!urls.length) return result;
     const cache = CacheService.getScriptCache();
+    const putOgCache_ = (url, data) => {
+      try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
+    };
     const keys = urls.map(ogCacheKey_);
     const cached = cache.getAll(keys) || {};
     const misses = [];
@@ -1167,7 +1180,7 @@ export const resolveOgData_ = (urls) => {
         const d = apiData[url];
         if (d && (d.title || d.image)) {
           result[url] = { title: d.title || '', image: d.image || '', description: d.description || '' };
-          try { cache.put(ogCacheKey_(url), JSON.stringify(result[url]), OG_CACHE_TTL); } catch (e) { /* ignore */ }
+          putOgCache_(url, result[url]);
           unresolved.delete(url);
         }
         // The API answered but has no data for this URL: do not refetch
@@ -1189,7 +1202,7 @@ export const resolveOgData_ = (urls) => {
     const storeResult_ = (url, data) => {
       if (data && (data.title || data.image)) {
         result[url] = data;
-        try { cache.put(ogCacheKey_(url), JSON.stringify(data), OG_CACHE_TTL); } catch (e) { /* ignore */ }
+        putOgCache_(url, data);
         unresolved.delete(url);
       }
       // No usable OG data (or the fetch failed / was skipped): the URL
@@ -1277,7 +1290,7 @@ export const resolveOgData_ = (urls) => {
  * out in a single parallel fetchAll.
  */
 export const fetchOgDataFromApi_ = (urls) => {
-  const base = String(PropertiesService.getScriptProperties().getProperty('OGP_API_BASE_URL') || '').replace(/\/+$/, '');
+  const base = scriptProperty_('OGP_API_BASE_URL').replace(/\/+$/, '');
   if (!base) return null;
   const chunks = [];
   let current = [];
@@ -1346,9 +1359,7 @@ export const zeOgEntryToData_ = (entry) => {
  * Returns how many entries were imported.
  */
 export const syncOgpCache_ = (cache, force) => {
-  const cacheUrl = String(
-    PropertiesService.getScriptProperties().getProperty(ZE_OGP_CACHE_URL_PROPERTY) || ''
-  );
+  const cacheUrl = scriptProperty_(ZE_OGP_CACHE_URL_PROPERTY);
   if (!cacheUrl) return 0;
   const now = Date.now();
   if (!force) {
@@ -1422,10 +1433,8 @@ export const resolveOgViaZe_ = (urls, result, cache) => {
     remaining.push(url);
   });
   if (!remaining.length) return remaining;
-  const token = String(PropertiesService.getScriptProperties().getProperty('HOME_API_TOKEN') || '');
-  const requestBase = String(
-    PropertiesService.getScriptProperties().getProperty(ZE_OGP_REQUEST_BASE_PROPERTY) || ''
-  );
+  const token = scriptProperty_('HOME_API_TOKEN');
+  const requestBase = scriptProperty_(ZE_OGP_REQUEST_BASE_PROPERTY);
   if (!token || !requestBase) return remaining;
   let requested = 0;
   remaining.forEach((url) => {
@@ -1530,14 +1539,7 @@ export const parseGrayoutMarker_ = (text) => {
   return /^\[\[\s*画像グレーアウト\s*\]\]$/.test(text.trim()) ? true : null;
 };
 
-export const isGrayoutMarkerElement_ = (el) => {
-  try {
-    if (el.getType() !== DocumentApp.ElementType.PARAGRAPH) return false;
-    return parseGrayoutMarker_(paragraphPlainText_(el.asParagraph())) !== null;
-  } catch (e) {
-    return false;
-  }
-};
+export const isGrayoutMarkerElement_ = (el) => markerFromElement_(el, parseGrayoutMarker_) !== null;
 
 export const linkCardMarkdown_ = (url, og) => {
   if (!og || (!og.title && !og.image)) return null;
@@ -1722,9 +1724,7 @@ export const paragraphTextWithInlineStyles_ = (p, grayoutImage = false) => {
     const fullText = textEl.getText();
     if (!fullText) continue;
 
-    const indices = textEl.getTextAttributeIndices() || [];
-    if (indices.length === 0 || indices[0] !== 0) indices.unshift(0);
-    if (indices[indices.length - 1] !== fullText.length) indices.push(fullText.length);
+    const indices = attributeBoundaries_(textEl, fullText.length);
 
     for (let k = 0; k < indices.length - 1; k++) {
       const start = indices[k];
@@ -1780,6 +1780,7 @@ export const pubDateFromTitle_ = (title) => {
 };
 
 const generateRSSResponse_ = () => {
+  const config = getConfig_();
   const props = PropertiesService.getScriptProperties();
   const indexStr = props.getProperty('RSS_DATA');
   let items = [];
@@ -1812,9 +1813,9 @@ ${pubDate ? `      <pubDate>${pubDate}</pubDate>\n` : ''}      <description>${es
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
-    <title>${escapeXml_(getConfig_().siteTitle)}</title>
-    <link>${escapeXml_(getConfig_().siteUrl)}</link>
-    <description>${escapeXml_(getConfig_().siteDescription)}</description>
+    <title>${escapeXml_(config.siteTitle)}</title>
+    <link>${escapeXml_(config.siteUrl)}</link>
+    <description>${escapeXml_(config.siteDescription)}</description>
 ${itemsXml}  </channel>
 </rss>`;
 
