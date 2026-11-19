@@ -2689,9 +2689,11 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      // One stored file per article, plus the snapshot index.
-      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 3);
+      // One stored file per article, plus the snapshot index and
+      // the OGP dispatch record.
+      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 4);
       expect(stored.has('index.json')).toBe(true);
+      expect(stored.has(Code.OGP_DISPATCH_FILE_NAME)).toBe(true);
       const docPuts = mockCache.put.mock.calls.filter((c) => String(c[0]).startsWith('id'));
       expect(docPuts).toHaveLength(Code.PRE_CACHE_LIMIT);
     });
@@ -3176,6 +3178,131 @@ describe('Code.js', () => {
           expect(JSON.parse(c[1]).tags).toEqual([`タグ${c[0]}`]);
         });
       });
+    });
+  });
+  describe('OGP auto-dispatch', () => {
+    const MODIFIED = 1700000000000;
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      content,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+      setTrashed: vi.fn(),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+      createFile: vi.fn((name, content) => {
+        const f = makeFile(name, content);
+        stored.set(name, f);
+        return f;
+      }),
+      getFiles: vi.fn(() => {
+        const files = [...stored.values()];
+        let i = 0;
+        return { hasNext: () => i < files.length, next: () => files[i++] };
+      }),
+    };
+    const docFile = (id, name) => ({
+      getId: () => id,
+      getName: () => name,
+      getLastUpdated: () => new Date(MODIFIED),
+    });
+    const runPreCacheAllWithDocs = (files) => {
+      let i = 0;
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: vi.fn(() => ({ hasNext: () => i < files.length, next: () => files[i++] })),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+      Code.preCacheAll();
+    };
+    const seedRecord = (ids) => {
+      const f = makeFile(Code.OGP_DISPATCH_FILE_NAME, JSON.stringify({ ids }));
+      stored.set(Code.OGP_DISPATCH_FILE_NAME, f);
+      return f;
+    };
+    const setDispatchToken = (token) => {
+      mockProperties.getProperty.mockImplementation((key) =>
+        key === 'GITHUB_DISPATCH_TOKEN' ? token : (TEST_CONFIG[key] ?? null)
+      );
+    };
+    const dispatchCalls = () => mockUrlFetchApp.fetch.mock.calls.filter((c) => c[0] === Code.OGP_DISPATCH_URL);
+    const savedRecordIds = () => JSON.parse(stored.get(Code.OGP_DISPATCH_FILE_NAME).content).ids;
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      cacheFolder.createFile.mockClear();
+      mockCache.get.mockReturnValue(null);
+      mockUrlFetchApp.fetch.mockReset();
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      mockDocumentApp.openById.mockImplementation((id) => ({
+        getName: () => `Doc ${id}`,
+        getBody: () => ({ getNumChildren: () => 0 }),
+      }));
+    });
+
+    it('seeds the record on the first run and dispatches nothing, even with a token', () => {
+      setDispatchToken('test-token');
+      runPreCacheAllWithDocs([docFile('doc-a', 'Doc A'), docFile('doc-b', 'Doc B')]);
+      expect(stored.has(Code.OGP_DISPATCH_FILE_NAME)).toBe(true);
+      expect(new Set(savedRecordIds())).toEqual(new Set(['doc-a', 'doc-b']));
+      expect(dispatchCalls()).toHaveLength(0);
+    });
+
+    it('dispatches exactly once when a new article appears and a token is set', () => {
+      seedRecord(['doc-a']);
+      setDispatchToken('test-token');
+      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 204 });
+      runPreCacheAllWithDocs([docFile('doc-a', 'Doc A'), docFile('doc-b', 'Doc B')]);
+      const calls = dispatchCalls();
+      expect(calls).toHaveLength(1);
+      const [, options] = calls[0];
+      expect(options.method).toBe('post');
+      expect(options.muteHttpExceptions).toBe(true);
+      expect(JSON.parse(options.payload)).toEqual({ ref: 'main' });
+      expect(options.headers.Authorization).toBe('Bearer test-token');
+      expect(options.headers.Accept).toBe('application/vnd.github+json');
+      expect(new Set(savedRecordIds())).toEqual(new Set(['doc-a', 'doc-b']));
+    });
+
+    it('still completes when the dispatch returns an HTTP error', () => {
+      seedRecord(['doc-a']);
+      setDispatchToken('test-token');
+      mockUrlFetchApp.fetch.mockReturnValue({ getResponseCode: () => 401 });
+      expect(() => runPreCacheAllWithDocs([docFile('doc-a', 'Doc A'), docFile('doc-b', 'Doc B')])).not.toThrow();
+      expect(dispatchCalls()).toHaveLength(1);
+      expect(global.console.log).toHaveBeenCalledWith(expect.stringContaining('HTTP 401'));
+      expect(new Set(savedRecordIds())).toEqual(new Set(['doc-a', 'doc-b']));
+    });
+
+    it('still completes when the dispatch request throws', () => {
+      seedRecord(['doc-a']);
+      setDispatchToken('test-token');
+      mockUrlFetchApp.fetch.mockImplementation(() => { throw new Error('network down'); });
+      expect(() => runPreCacheAllWithDocs([docFile('doc-a', 'Doc A'), docFile('doc-b', 'Doc B')])).not.toThrow();
+      expect(global.console.error).toHaveBeenCalledWith(expect.stringContaining('OGP dispatch check failed: network down'));
+      expect(new Set(savedRecordIds())).toEqual(new Set(['doc-a', 'doc-b']));
+    });
+
+    it('records new articles without dispatching when no token is set', () => {
+      seedRecord(['doc-a']);
+      runPreCacheAllWithDocs([docFile('doc-a', 'Doc A'), docFile('doc-b', 'Doc B')]);
+      expect(dispatchCalls()).toHaveLength(0);
+      expect(new Set(savedRecordIds())).toEqual(new Set(['doc-a', 'doc-b']));
+    });
+
+    it('keeps the dispatch record when pruning orphan snapshots', () => {
+      const recordFile = seedRecord(['doc-a']);
+      const orphan = makeFile('gone-id.json', '{}');
+      stored.set('gone-id.json', orphan);
+      runPreCacheAllWithDocs([docFile('doc-a', 'Doc A')]);
+      expect(orphan.setTrashed).toHaveBeenCalled();
+      expect(recordFile.setTrashed).not.toHaveBeenCalled();
     });
   });
 });
