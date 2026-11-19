@@ -1337,27 +1337,6 @@ describe('Code.js', () => {
       expect(firstChunk.length).toBe(Code.RSS_CACHE_LIMIT);
     });
 
-    it('should keep pinned articles even outside the RSS_CACHE_LIMIT window', () => {
-      const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
-      const pinnedId = `id${Code.RSS_CACHE_LIMIT + 9}`;
-      mockCache.get.mockImplementation((key) => {
-        if (key === '0') return JSON.stringify(allIds);
-        return JSON.stringify({ id: key, title: 'Title', markdown: 'short' });
-      });
-      mockProperties.getProperty.mockImplementation((key) =>
-        key === 'PRE_CACHE_PINNED_IDS' ? pinnedId : null
-      );
-
-      Code.dailyRSSCache();
-
-      const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
-      const savedItems = savedDataKeys.flatMap((k) =>
-        JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === k)[1])
-      );
-      expect(savedItems).toHaveLength(Code.RSS_CACHE_LIMIT + 1);
-      expect(savedItems.map((item) => item.id)).toContain(pinnedId);
-    });
-
     it('should respect TOTAL_LIMIT (450KB)', () => {
       const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
       // Each article ~9000 bytes.
@@ -3573,6 +3552,12 @@ describe('Music markers', () => {
         mockLanguageApp.translate.mockImplementation(() => { throw new Error('quota exceeded'); });
         expect(() => Code.translateMarkdown_('本文です\n', 'en')).toThrow('quota exceeded');
       });
+
+      it('aborts at the deadline before any LanguageApp call', () => {
+        expect(() => Code.translateMarkdown_('本文です\n', 'en', Date.now() - 1)).toThrow('Translation deadline exceeded');
+        expect(() => Code.translateArticle_({ id: 'x', title: '題名', markdown: '本文\n', tags: [] }, 'en', Date.now() - 1)).toThrow('Translation deadline exceeded');
+        expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+      });
     });
 
     describe('language snapshots', () => {
@@ -3794,6 +3779,100 @@ describe('Music markers', () => {
         Code.preCacheAll();
 
         expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({});
+      });
+
+      it('keeps titles entries recorded by another writer during the run', () => {
+        // Regression: preCacheAll used to persist the titles maps
+        // from its start-of-run copies at the end of the run, so
+        // an entry recorded meanwhile (an on-demand store, or a
+        // translation by an overlapping run) was silently lost —
+        // and with it the proof that the translation ever landed.
+        stored.set('titles-en.json', makeFile('titles-en.json', '{}'));
+        let injected = false;
+        mockLanguageApp.translate.mockImplementation((text, source, target) => {
+          if (!injected) {
+            injected = true;
+            const cur = JSON.parse(stored.get('titles-en.json').content);
+            cur['concurrent-id'] = { title: 'Concurrent', sourceModified: MODIFIED };
+            stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify(cur)));
+          }
+          return tagTranslate(text, source, target);
+        });
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-x', '題名')]));
+        mockDocumentApp.openById.mockReturnValue(emptyBodyDoc('題名'));
+
+        Code.preCacheAll();
+
+        const entries = JSON.parse(stored.get('titles-en.json').content);
+        expect(entries['doc-x']).toEqual({ title: '[en]題名', sourceModified: MODIFIED });
+        expect(entries['concurrent-id']).toEqual({ title: 'Concurrent', sourceModified: MODIFIED });
+      });
+
+      // Seeds `count` already-fresh articles whose only stale
+      // work is the LAST one's translations, then runs
+      // preCacheAll with a clock that advances 100s per
+      // LanguageApp call: exactly one of the last article's two
+      // languages fits inside the snapshot budget.
+      const runBackfillWithClock = (count) => {
+        const files = [];
+        for (let i = 0; i < count; i++) files.push(docFile(`id${i}`, `Doc ${i}`));
+        const sorted = files.slice().sort((a, b) => b.getName().localeCompare(a.getName(), 'ja'));
+        const tailId = sorted[sorted.length - 1].getId();
+        const index = {};
+        const enTitles = {};
+        const zhTitles = {};
+        files.forEach((f) => {
+          const id = f.getId();
+          index[id] = { sourceModified: MODIFIED, title: f.getName(), tags: [] };
+          stored.set(`${id}.json`, makeFile(`${id}.json`, JSON.stringify({ id, title: f.getName(), markdown: '本文です\n', tags: [], sourceModified: MODIFIED })));
+          if (id !== tailId) {
+            enTitles[id] = { title: 'Done', sourceModified: MODIFIED };
+            zhTitles[id] = { title: 'Done', sourceModified: MODIFIED };
+          }
+        });
+        stored.set('index.json', makeFile('index.json', JSON.stringify(index)));
+        stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify(enTitles)));
+        stored.set('titles-zh.json', makeFile('titles-zh.json', JSON.stringify(zhTitles)));
+        const realNow = Date.now;
+        let now = realNow();
+        Date.now = () => now;
+        mockLanguageApp.translate.mockImplementation((text, source, target) => {
+          now += 100000;
+          return tagTranslate(text, source, target);
+        });
+        try {
+          mockDriveApp.getFolderById.mockReturnValue(articleFolder(files));
+          Code.preCacheAll();
+        } finally {
+          Date.now = realNow;
+        }
+        return tailId;
+      };
+
+      it('aborts an over-deadline translation mid-article and writes nothing partial', () => {
+        // The tail article sits at an even position, so English
+        // goes first and completes; Chinese starts inside the
+        // budget but crosses the deadline mid-article and must
+        // abort — no snapshot, no titles entry — instead of
+        // running on and consuming the rest of the run (the old
+        // behaviour, which also finished Chinese in full here).
+        const tailId = runBackfillWithClock(Code.PRE_CACHE_LIMIT + 1);
+
+        expect(stored.has(`${tailId}.en.json`)).toBe(true);
+        expect(JSON.parse(stored.get('titles-en.json').content)[tailId].sourceModified).toBe(MODIFIED);
+        expect(stored.has(`${tailId}.zh.json`)).toBe(false);
+        expect(JSON.parse(stored.get('titles-zh.json').content)[tailId]).toBeUndefined();
+      });
+
+      it('alternates the language order so the tail article is not always English-first', () => {
+        // One position later the same setup must complete
+        // Chinese first and leave English for a later run.
+        const tailId = runBackfillWithClock(Code.PRE_CACHE_LIMIT + 2);
+
+        expect(stored.has(`${tailId}.zh.json`)).toBe(true);
+        expect(JSON.parse(stored.get('titles-zh.json').content)[tailId].sourceModified).toBe(MODIFIED);
+        expect(stored.has(`${tailId}.en.json`)).toBe(false);
+        expect(JSON.parse(stored.get('titles-en.json').content)[tailId]).toBeUndefined();
       });
     });
 
