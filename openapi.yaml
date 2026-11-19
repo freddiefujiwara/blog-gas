@@ -15,6 +15,7 @@ paths:
         - If an `id` is provided, returns the content of that specific document.
         - If `o=rss` is provided, returns an RSS 2.0 feed of the latest 50 articles.
         - If `o=titles` is provided, returns only the IDs, titles and tags of all documents.
+        - If `o=translation-status` is provided, returns per-article translation coverage (fresh/stale/missing per language), computed from the translation snapshots.
         - Articles may carry tags, extracted from a `[[タグ：運営、技術]]` marker paragraph in the Doc (the marker is removed from the markdown).
       parameters:
         - name: id
@@ -29,7 +30,7 @@ paths:
           required: false
           schema:
             type: string
-            enum: [rss, titles]
+            enum: [rss, titles, translation-status]
       responses:
         '200':
           description: Successful response. Returns document list, document content, or RSS feed.

@@ -650,6 +650,92 @@ export const writeSnapshotIndex_ = (index) => {
   }
 };
 
+/** -----------------------------
+ *  Translation status: per article and language, whether the
+ *  language snapshot in the article-cache folder was made from
+ *  the current Japanese snapshot — the same fact the article
+ *  read path acts on (a translation is served only while its
+ *  sourceModified stamp still matches; see readSnapshotFile_).
+ *  The status is computed from the snapshot files themselves,
+ *  never from the language titles maps: those stamps are a
+ *  separate record and have diverged from the snapshots before
+ *  (a titles list claiming an article translated while the
+ *  article itself served Japanese).
+ *  ----------------------------- */
+
+// The sourceModified stamps of every copy of a snapshot file
+// (duplicate files under one name do occur; see
+// writeSnapshotIndex_). Copies that cannot be read or parsed
+// contribute nothing.
+export const snapshotStamps_ = (fileName) => {
+  const stamps = [];
+  try {
+    const files = getArticleCacheFolder_().getFilesByName(fileName);
+    const seen = new Set();
+    while (files.hasNext()) {
+      const file = files.next();
+      // Same duplicate-iterator guard as writeSnapshotIndex_:
+      // each copy is handled exactly once.
+      const key = typeof file.getId === 'function' ? file.getId() : file;
+      if (seen.has(key)) break;
+      seen.add(key);
+      try {
+        const data = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
+        if (data && typeof data.sourceModified === 'number') stamps.push(data.sourceModified);
+      } catch (e) { /* an unreadable copy proves nothing */ }
+    }
+  } catch (e) {
+    log_(`Snapshot stamp read failed (${fileName}): ${e.message}`);
+  }
+  return stamps;
+};
+
+// The stamp of the current Japanese snapshot of one article:
+// the copy the snapshot index points at when duplicates exist
+// (the index is written together with every snapshot write),
+// otherwise the newest stamp on record. Null when the article
+// has no Japanese snapshot at all.
+export const canonicalJapaneseStamp_ = (docId, index) => {
+  const stamps = snapshotStamps_(`${docId}.json`);
+  if (!stamps.length) return null;
+  const indexed = index && index[docId] ? index[docId].sourceModified : null;
+  if (indexed != null && stamps.includes(indexed)) return indexed;
+  return Math.max(...stamps);
+};
+
+// 'fresh' when a language snapshot made from the current
+// Japanese snapshot exists, 'stale' when a language snapshot
+// exists but was made from an older Japanese snapshot, and
+// 'missing' when there is none.
+export const langSnapshotStatus_ = (docId, lang, japaneseStamp) => {
+  const stamps = snapshotStamps_(langSnapshotFileName_(docId, lang));
+  if (!stamps.length) return 'missing';
+  return japaneseStamp != null && stamps.includes(japaneseStamp) ? 'fresh' : 'stale';
+};
+
+export const translationStatus_ = () => {
+  const docs = listDocsSortedByTitle_(getConfig_().folderId);
+  const index = readSnapshotIndex_();
+  const languages = {};
+  ARTICLE_LANGS.forEach((lang) => { languages[lang] = { fresh: 0, stale: 0, missing: 0 }; });
+  const articles = docs.map((d) => {
+    const japaneseStamp = canonicalJapaneseStamp_(d.id, index);
+    const entry = { id: d.id, title: d.title };
+    for (const lang of ARTICLE_LANGS) {
+      const status = langSnapshotStatus_(d.id, lang, japaneseStamp);
+      entry[lang] = status;
+      languages[lang][status] += 1;
+    }
+    return entry;
+  });
+  return {
+    generatedAt: new Date().toISOString(),
+    total: docs.length,
+    languages,
+    articles,
+  };
+};
+
 /**
  * Persist a freshly converted article: always to the Drive
  * snapshot (any size), and to CacheService too when it fits.
@@ -1385,6 +1471,7 @@ export const listIdsAndTitles_ = (cache) => {
 export const doGet = (e) => {
   const { id: docId, o: output, lang: langParam } = (e && e.parameter) || {};
   if (output === 'rss') return generateRSSResponse_();
+  if (output === 'translation-status') return json_(translationStatus_());
   // Only the exact values en/zh select a translation; no lang,
   // lang=ja and anything else keep the Japanese behaviour below,
   // byte for byte.
