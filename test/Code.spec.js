@@ -3876,6 +3876,257 @@ describe('Music markers', () => {
       });
     });
 
+    describe('spliceableDiffIndices_ / applyLineSplice_', () => {
+      it('returns no indices for identical markdown', () => {
+        expect(Code.spliceableDiffIndices_('本文です\n', '本文です\n')).toEqual([]);
+      });
+
+      it('accepts a bare URL that became a link card', () => {
+        const before = '本文です\n\nhttps://example.com/x\n\n終わりです\n';
+        const after = '本文です\n\n<a class="link-card" href="https://example.com/x">card</a>\n\n終わりです\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toEqual([2]);
+      });
+
+      it('accepts an image whose destination changed but alt text did not', () => {
+        const before = '本文です\n\n![説明](https://example.com/1.png)\n';
+        const after = '本文です\n\n![説明](https://example.com/2.png)\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toEqual([2]);
+      });
+
+      it('rejects an image whose alt text changed (alt text is translated prose)', () => {
+        const before = '![説明A](https://example.com/1.png)\n';
+        const after = '![説明B](https://example.com/1.png)\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toBeNull();
+      });
+
+      it('accepts a code fence content change', () => {
+        const before = '```\nconst a = 1;\n```\n';
+        const after = '```\nconst a = 2;\n```\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toEqual([1]);
+      });
+
+      it('accepts a lyrics line change (lyrics are never translated)', () => {
+        const before = '[[歌詞]]\n\n歌詞の一行目\n\n本文です\n';
+        const after = '[[歌詞]]\n\n歌詞の二行目\n\n本文です\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toEqual([2]);
+      });
+
+      it('accepts a heading change and a bold title line change', () => {
+        expect(Code.spliceableDiffIndices_('## 見出しA\n', '## 見出しB\n')).toEqual([0]);
+        expect(Code.spliceableDiffIndices_('**商品A**\n', '**商品B**\n')).toEqual([0]);
+      });
+
+      it('rejects a prose change', () => {
+        expect(Code.spliceableDiffIndices_('本文です\n', '本文が変わりました\n')).toBeNull();
+      });
+
+      it('rejects a line count change', () => {
+        expect(Code.spliceableDiffIndices_('本文です\n', '本文です\n\n追加です\n')).toBeNull();
+      });
+
+      it('rejects a mix of protected and prose changes', () => {
+        const before = '本文です\n\nhttps://example.com/old\n';
+        const after = '変わりました\n\nhttps://example.com/new\n';
+        expect(Code.spliceableDiffIndices_(before, after)).toBeNull();
+      });
+
+      it('applyLineSplice_ replaces the given lines and rejects a line count mismatch', () => {
+        expect(Code.applyLineSplice_('a\nb\nc\n', 'x\ny\nz\n', [1])).toBe('a\ny\nc\n');
+        expect(Code.applyLineSplice_('a\nb\n', 'x\ny\nz\n', [1])).toBeNull();
+      });
+    });
+
+    describe('preCacheAll translation splice', () => {
+      const docFile = (id, name) => ({ getId: () => id, getName: () => name, getLastUpdated: () => new Date(MODIFIED) });
+      const textEl = (text) => ({
+        getType: () => mockDocumentApp.ElementType.TEXT,
+        asText: () => ({
+          getText: () => text,
+          getTextAttributeIndices: () => [0],
+          getAttributes: () => ({}),
+        }),
+      });
+      const paraEl = (text, heading) => ({
+        getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+        asParagraph: () => ({
+          getHeading: () => heading || mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => textEl(text),
+        }),
+      });
+      const docWithParas = (name, paras) => ({
+        getName: () => name,
+        getBody: () => ({
+          getNumChildren: () => paras.length,
+          getChild: (i) => paras[i],
+        }),
+      });
+      // One article whose Japanese snapshot is stale (stamped
+      // MODIFIED - 1) with stale translations in both languages,
+      // so preCacheAll must reconvert it from the Doc.
+      const seedStaleArticle = (jaMarkdown, enMarkdown, zhMarkdown) => {
+        stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: '題名', markdown: jaMarkdown, tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('doc-x.en.json', makeFile('doc-x.en.json', JSON.stringify({ id: 'doc-x', title: 'Title EN', markdown: enMarkdown, tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('doc-x.zh.json', makeFile('doc-x.zh.json', JSON.stringify({ id: 'doc-x', title: 'Title ZH', markdown: zhMarkdown, tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED - 1 } })));
+        stored.set('titles-zh.json', makeFile('titles-zh.json', JSON.stringify({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED - 1 } })));
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-x', '題名')]));
+      };
+
+      beforeEach(() => {
+        mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+        // OG resolution must not turn the bare-URL paragraphs
+        // below into link cards: other suites leave UrlFetchApp
+        // implementations behind that would otherwise leak in.
+        mockUrlFetchApp.fetchAll.mockImplementation(() => []);
+        mockUrlFetchApp.fetch.mockImplementation(() => { throw new Error('offline'); });
+      });
+
+      it('carries translations over a protected-only change without calling LanguageApp', () => {
+        seedStaleArticle(
+          '本文です\n\nhttps://example.com/old\n\n終わりです\n',
+          '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n',
+          '[zh]本文です\n\nhttps://example.com/old\n\n[zh]終わりです\n',
+        );
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.title).toBe('Title EN');
+        expect(en.sourceModified).toBe(MODIFIED);
+        const zh = JSON.parse(stored.get('doc-x.zh.json').content);
+        expect(zh.markdown).toBe('[zh]本文です\n\nhttps://example.com/new\n\n[zh]終わりです\n');
+        expect(zh.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED } });
+        expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED } });
+      });
+
+      it('carries translations over a heading-only change', () => {
+        seedStaleArticle(
+          '本文です\n\n## 見出しA\n\n終わりです\n',
+          '[en]本文です\n\n## Heading A\n\n[en]終わりです\n',
+          '[zh]本文です\n\n## 标题 A\n\n[zh]終わりです\n',
+        );
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('見出しB', mockDocumentApp.ParagraphHeading.HEADING2),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\n## 見出しB\n\n[en]終わりです\n');
+        expect(en.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED } });
+      });
+
+      it('retranslates as before when prose changed', () => {
+        seedStaleArticle(
+          '本文です\n\n終わりです\n',
+          '[en]本文です\n\n[en]終わりです\n',
+          '[zh]本文です\n\n[zh]終わりです\n',
+        );
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文が変わりました'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文が変わりました\n\n[en]終わりです\n');
+        expect(en.title).toBe('[en]題名');
+        expect(en.sourceModified).toBe(MODIFIED);
+      });
+
+      it('retranslates as before when a paragraph was added (line count changed)', () => {
+        seedStaleArticle(
+          '本文です\n\n終わりです\n',
+          '[en]本文です\n\n[en]終わりです\n',
+          '[zh]本文です\n\n[zh]終わりです\n',
+        );
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('追加されました'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\n[en]追加されました\n\n[en]終わりです\n');
+      });
+
+      it('retranslates as before when protected and prose lines both changed', () => {
+        seedStaleArticle(
+          '本文です\n\nhttps://example.com/old\n\n終わりです\n',
+          '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n',
+          '[zh]本文です\n\nhttps://example.com/old\n\n[zh]終わりです\n',
+        );
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文が変わりました'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toContain('[en]本文が変わりました');
+        expect(en.markdown).toContain('https://example.com/new');
+      });
+
+      it('retranslates as before when the title changed', () => {
+        seedStaleArticle(
+          '本文です\n\nhttps://example.com/old\n\n終わりです\n',
+          '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n',
+          '[zh]本文です\n\nhttps://example.com/old\n\n[zh]終わりです\n',
+        );
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-x', '新しい題名')]));
+        mockDocumentApp.openById.mockReturnValue(docWithParas('新しい題名', [
+          paraEl('本文です'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.title).toBe('[en]新しい題名');
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+      });
+
+      it('translates a reconverted article that has no translations yet, as before', () => {
+        stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: '題名', markdown: '本文です\n\nhttps://example.com/old\n\n終わりです\n', tags: [], sourceModified: MODIFIED - 1 })));
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-x', '題名')]));
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.sourceModified).toBe(MODIFIED);
+      });
+    });
+
     describe('TRANSLATE_BACKFILL_LIMIT', () => {
       const docFile = (id, name) => ({ getId: () => id, getName: () => name, getLastUpdated: () => new Date(MODIFIED) });
       // Two already-fresh articles, newest first in list order,

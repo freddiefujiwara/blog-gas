@@ -166,6 +166,39 @@ export const preCacheAll = () => {
       }
     }
   };
+  // Carry the existing translations over a reconversion whose
+  // changes are all spliceable (see spliceableDiffIndices_):
+  // each stale language snapshot gets the changed lines from
+  // the new Japanese markdown and is re-stamped through the
+  // same bookkeeping as a landed translation, so the language
+  // pass below sees it fresh and never calls LanguageApp for
+  // it. A changed article title, or any prose change, leaves
+  // every language stale, exactly as before. `previous` is the
+  // outgoing Japanese snapshot, read by the caller before the
+  // reconversion overwrote it. Splicing spends no LanguageApp
+  // quota, so the TRANSLATE_BACKFILL_LIMIT window (which exists
+  // to protect that quota) does not apply to it.
+  const spliceTranslations_ = (id, previous, article) => {
+    if (!previous || previous.title !== article.title) return;
+    const indices = spliceableDiffIndices_(previous.markdown, article.markdown);
+    if (!indices) return;
+    for (const lang of ARTICLE_LANGS) {
+      if (langEntryFresh_(lang, id)) continue;
+      const old = readDriveArticleLangCacheRaw_(id, lang);
+      if (!old) continue;
+      const title = (typeof old.title === 'string' && old.title)
+        || (langTitles[lang][id] && langTitles[lang][id].title);
+      if (!title) continue;
+      const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
+      if (markdown == null) continue;
+      writeDriveArticleLangCache_({ id, title, markdown, tags: article.tags }, lang);
+      const entry = { title, sourceModified: modifiedById[id] };
+      langTitles[lang][id] = entry;
+      langTitlesRemoved[lang].delete(id);
+      recordLangTitle_(lang, id, entry);
+      console.log(`Translation carried over: ${title} (${lang})`);
+    }
+  };
   // A rename also moves the Doc's modified time (forcing a
   // reconversion), but patch a drifted snapshot title in place as
   // well so it never has to wait for one.
@@ -234,8 +267,14 @@ export const preCacheAll = () => {
       const title = doc.getName();
       const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
       convertedTags[id] = article.tags;
+      // Read the outgoing Japanese snapshot before the write
+      // below replaces it: when the reconversion changed only
+      // spliceable lines, the existing translations are carried
+      // over instead of retranslated (see spliceTranslations_).
+      const previous = readDriveArticleCacheRaw_(id);
       writeDriveArticleCache_(article);
       rememberIndex_(id, title, article.tags);
+      if (previous) spliceTranslations_(id, previous, article);
       ensureLangSnapshots_(id, article, articlePosition);
 
       const articlePayload = JSON.stringify(article);
@@ -542,6 +581,30 @@ export const LANG_TARGETS = { en: 'en', zh: 'zh-CN' };
 export const langSnapshotFileName_ = (docId, lang) => `${docId}.${lang}.json`;
 
 export const readDriveArticleLangCache_ = (docId, lang) => readSnapshotFile_(langSnapshotFileName_(docId, lang), docId);
+
+// readSnapshotFile_ without the freshness rule: the previous
+// conversion stored in a snapshot file, whatever stamp it
+// carries. preCacheAll reads the outgoing Japanese snapshot
+// through this before a reconversion overwrites it, to decide
+// whether the existing translations can be carried over (see
+// the translation splice section below); the language snapshots
+// are read the same way when they are spliced.
+const readSnapshotFileRaw_ = (fileName) => {
+  try {
+    const files = getArticleCacheFolder_().getFilesByName(fileName);
+    if (!files.hasNext()) return null;
+    const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
+    if (!data || !data.markdown || !Array.isArray(data.tags)) return null;
+    return { id: data.id, title: data.title, markdown: data.markdown, tags: data.tags };
+  } catch (e) {
+    log_(`Drive article cache raw read failed (${fileName}): ${e.message}`);
+    return null;
+  }
+};
+
+export const readDriveArticleCacheRaw_ = (docId) => readSnapshotFileRaw_(`${docId}.json`);
+
+export const readDriveArticleLangCacheRaw_ = (docId, lang) => readSnapshotFileRaw_(langSnapshotFileName_(docId, lang));
 
 export const writeDriveArticleLangCache_ = (article, lang) => {
   try {
@@ -1140,6 +1203,106 @@ export const storeTranslatedArticle_ = (article, lang) => {
     sourceModified: DriveApp.getFileById(article.id).getLastUpdated().getTime(),
   });
   return translated;
+};
+
+/** -----------------------------
+ *  Translation splice: when a reconversion changes only lines
+ *  whose prose the translator would see is unchanged — or that
+ *  carry no prose at all — the existing translations stay valid
+ *  for every line except the changed ones, and those lines are
+ *  language-independent by construction (link cards, images,
+ *  bare URLs, code, markers, music embeds, lyrics: the
+ *  protected side of splitMarkdownSegments_). Replacing the
+ *  changed lines inside each language snapshot with the new
+ *  Japanese lines and re-stamping it therefore yields exactly
+ *  what a retranslation would serve for those lines, without
+ *  spending LanguageApp quota — quota a regeneration-heavy
+ *  article (the stuff list is rebuilt every 6 hours, changing
+ *  only a few card and heading lines) would otherwise burn
+ *  through on every cycle, serving Japanese in the meantime.
+ *  Heading lines and single-bold-span title lines are the one
+ *  exception: their text IS prose for the translator, but they
+ *  carry names and titles, and serving the current Japanese
+ *  line inside a translated article is the accepted trade-off
+ *  (the next genuine prose edit retranslates the article in
+ *  full anyway). Any other prose change keeps the old
+ *  behaviour: the translations go stale and the backfill
+ *  retranslates them.
+ *  ----------------------------- */
+
+// The prose fragments of every line of a markdown document,
+// under the translator's own segmentation
+// (splitMarkdownSegments_): fragmentsByLine[i] is the list of
+// prose pieces overlapping line i, in order. Protected segments
+// contribute nothing, so a line the translator would pass
+// through untouched has an empty list. The segments concatenate
+// to the input byte for byte, so walking them while counting
+// newlines attributes every fragment to its line.
+export const proseFragmentsByLine_ = (markdown) => {
+  const text = String(markdown || '');
+  const byLine = text.split('\n').map(() => []);
+  let line = 0;
+  splitMarkdownSegments_(text).forEach((seg) => {
+    const pieces = seg.text.split('\n');
+    if (seg.prose) {
+      pieces.forEach((piece, k) => {
+        if (piece && byLine[line + k]) byLine[line + k].push(piece);
+      });
+    }
+    line += pieces.length - 1;
+  });
+  return byLine;
+};
+
+const HEADING_LINE_RE_ = /^#{1,6}\s+\S/;
+const BOLD_TITLE_LINE_RE_ = /^\*\*[^*]+\*\*$/;
+
+// The line indices at which newMarkdown differs from
+// oldMarkdown and may be spliced into an existing translation,
+// or null when the change is not spliceable: the line counts
+// differ, or some differing line's prose changed (and the line
+// is neither a heading nor a bold title line). A differing line
+// is spliceable when it carries no prose in the new document
+// (protected material), or when the prose fragments are the
+// same in both documents (the change is confined to protected
+// material inside the line — an image destination, a link
+// target, an inline URL).
+export const spliceableDiffIndices_ = (oldMarkdown, newMarkdown) => {
+  const oldLines = String(oldMarkdown || '').split('\n');
+  const newLines = String(newMarkdown || '').split('\n');
+  if (oldLines.length !== newLines.length) return null;
+  const oldFragments = proseFragmentsByLine_(oldMarkdown);
+  const newFragments = proseFragmentsByLine_(newMarkdown);
+  const indices = [];
+  for (let i = 0; i < newLines.length; i += 1) {
+    if (oldLines[i] === newLines[i]) continue;
+    const nf = newFragments[i] || [];
+    const of = oldFragments[i] || [];
+    const sameProse = nf.length === of.length && nf.every((f, k) => f === of[k]);
+    if (!nf.length || sameProse) {
+      indices.push(i);
+      continue;
+    }
+    const trimmed = newLines[i].trim();
+    if (HEADING_LINE_RE_.test(trimmed) || BOLD_TITLE_LINE_RE_.test(trimmed)) {
+      indices.push(i);
+      continue;
+    }
+    return null;
+  }
+  return indices;
+};
+
+// Replace the given line indices of a translation with the
+// lines of the new Japanese markdown. Null when the line
+// counts disagree (the translation was made from a document
+// of a different shape, so indices cannot be trusted).
+export const applyLineSplice_ = (targetMarkdown, sourceMarkdown, indices) => {
+  const target = String(targetMarkdown || '').split('\n');
+  const source = String(sourceMarkdown || '').split('\n');
+  if (target.length !== source.length) return null;
+  indices.forEach((i) => { target[i] = source[i]; });
+  return target.join('\n');
 };
 
 // The current Japanese article for the language read path: the
