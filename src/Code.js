@@ -336,7 +336,10 @@ export const dailyRSSCache = () => {
     const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(config.folderId);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
-    const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
+    // Pinned articles (PRE_CACHE_PINNED_IDS) stay in the RSS/OGP cache
+    // even when they fall outside the newest RSS_CACHE_LIMIT articles.
+    const targetIds = allIds.filter((id, index) => index < RSS_CACHE_LIMIT || config.pinnedIds.includes(id));
+    const itemsToSave = targetIds.map((id) => {
       const cachedArticle = cache.get(id);
       if (cachedArticle) return JSON.parse(cachedArticle);
       const driveCached = readDriveArticleCache_(id);

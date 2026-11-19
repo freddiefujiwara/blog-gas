@@ -1337,6 +1337,27 @@ describe('Code.js', () => {
       expect(firstChunk.length).toBe(Code.RSS_CACHE_LIMIT);
     });
 
+    it('should keep pinned articles even outside the RSS_CACHE_LIMIT window', () => {
+      const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
+      const pinnedId = `id${Code.RSS_CACHE_LIMIT + 9}`;
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(allIds);
+        return JSON.stringify({ id: key, title: 'Title', markdown: 'short' });
+      });
+      mockProperties.getProperty.mockImplementation((key) =>
+        key === 'PRE_CACHE_PINNED_IDS' ? pinnedId : null
+      );
+
+      Code.dailyRSSCache();
+
+      const savedDataKeys = JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === 'RSS_DATA')[1]);
+      const savedItems = savedDataKeys.flatMap((k) =>
+        JSON.parse(mockProperties.setProperty.mock.calls.find(c => c[0] === k)[1])
+      );
+      expect(savedItems).toHaveLength(Code.RSS_CACHE_LIMIT + 1);
+      expect(savedItems.map((item) => item.id)).toContain(pinnedId);
+    });
+
     it('should respect TOTAL_LIMIT (450KB)', () => {
       const allIds = Array.from({ length: Code.RSS_CACHE_LIMIT + 10 }, (_, i) => `id${i}`);
       // Each article ~9000 bytes.
