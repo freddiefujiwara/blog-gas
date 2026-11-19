@@ -21,7 +21,7 @@ const scriptProperty_ = (name) => String(PropertiesService.getScriptProperties()
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
-export const RSS_CACHE_LIMIT = 100;
+export const RSS_CACHE_LIMIT = 50;
 // Time budget for converting stale article snapshots in one
 // preCacheAll run; articles it cannot reach stay stale and are
 // picked up by the next run, so repeated runs converge.
@@ -105,7 +105,15 @@ export const preCacheAll = () => {
   // stamped with the Doc's current modified time means the
   // translation was made from the current article.
   const langTitles = { en: readLangTitles_('en'), zh: readLangTitles_('zh') };
-  let langTitlesDirty = false;
+  // Stamps dropped during this run (a title patch, or an article
+  // that left the folder). They are applied to a fresh read of
+  // each map at the end of the run, never to the copies above:
+  // additions are recorded the moment a translation lands (see
+  // ensureLangSnapshots_), so a run that is killed mid-way or
+  // overlapped by the next trigger cannot take the run's recorded
+  // progress with it, and this cleanup cannot clobber entries
+  // another writer added meanwhile.
+  const langTitlesRemoved = { en: new Set(), zh: new Set() };
   const langEntryFresh_ = (lang, id) => {
     const entry = langTitles[lang][id];
     return Boolean(entry && modifiedById[id] != null && entry.sourceModified === modifiedById[id]);
@@ -115,17 +123,28 @@ export const preCacheAll = () => {
   // skipped; a language whose turn comes after the snapshot
   // deadline is left stale for a later run (or an on-demand
   // read), exactly like conversion itself. Failures keep the
-  // previous snapshot and are retried next run.
-  const ensureLangSnapshots_ = (id, article) => {
+  // previous snapshot and are retried next run. The language
+  // order alternates with the article's position, so when the
+  // budget runs out mid-article the unfinished language is not
+  // always the same one.
+  const ensureLangSnapshots_ = (id, article, position) => {
     if (!article) return;
-    for (const lang of ARTICLE_LANGS) {
+    const langs = position % 2 === 0 ? ARTICLE_LANGS : [...ARTICLE_LANGS].reverse();
+    for (const lang of langs) {
       if (langEntryFresh_(lang, id)) continue;
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
+      // The translation itself stops at the deadline (hot-set
+      // articles, which may start late, get one extra budget
+      // window): one huge article aborts and keeps its previous
+      // snapshot instead of consuming the whole run.
+      const deadline = snapshotDeadline + (targetSet.has(id) ? SNAPSHOT_BUDGET_MS : 0);
       try {
-        const translated = translateArticle_(article, lang);
+        const translated = translateArticle_(article, lang, deadline);
         writeDriveArticleLangCache_(translated, lang);
-        langTitles[lang][id] = { title: translated.title, sourceModified: modifiedById[id] };
-        langTitlesDirty = true;
+        const entry = { title: translated.title, sourceModified: modifiedById[id] };
+        langTitles[lang][id] = entry;
+        langTitlesRemoved[lang].delete(id);
+        recordLangTitle_(lang, id, entry);
         console.log(`Translated: ${translated.title} (${lang})`);
       } catch (e) {
         console.error(`Failed to translate ID:${id} (${lang}): ${e.message}`);
@@ -146,7 +165,7 @@ export const preCacheAll = () => {
       ARTICLE_LANGS.forEach((lang) => {
         if (langTitles[lang][id]) {
           delete langTitles[lang][id];
-          langTitlesDirty = true;
+          langTitlesRemoved[lang].add(id);
         }
       });
     }
@@ -157,7 +176,10 @@ export const preCacheAll = () => {
     snapshotIndexDirty = true;
   };
 
+  let position = 0;
   for (const id of orderedIds) {
+    const articlePosition = position;
+    position += 1;
     try {
       const entry = snapshotIndex[id];
       const entryFresh = entry && modifiedById[id] != null
@@ -179,7 +201,7 @@ export const preCacheAll = () => {
         // actually needs it.
         if (ARTICLE_LANGS.some((lang) => !langEntryFresh_(lang, id))) {
           snapshot = snapshot || readDriveArticleCache_(id);
-          if (snapshot) ensureLangSnapshots_(id, snapshot);
+          if (snapshot) ensureLangSnapshots_(id, snapshot, articlePosition);
         }
         continue;
       }
@@ -189,7 +211,7 @@ export const preCacheAll = () => {
         patchSnapshotTitle_(snapshot, id);
         rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
-        ensureLangSnapshots_(id, snapshot);
+        ensureLangSnapshots_(id, snapshot, articlePosition);
         continue;
       }
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
@@ -199,7 +221,7 @@ export const preCacheAll = () => {
       convertedTags[id] = article.tags;
       writeDriveArticleCache_(article);
       rememberIndex_(id, title, article.tags);
-      ensureLangSnapshots_(id, article);
+      ensureLangSnapshots_(id, article, articlePosition);
 
       const articlePayload = JSON.stringify(article);
       if (articlePayload.length < CACHE_SIZE_LIMIT) {
@@ -225,16 +247,30 @@ export const preCacheAll = () => {
   if (snapshotIndexDirty) writeSnapshotIndex_(snapshotIndex);
 
   // Drop translated-title entries for articles that left the
-  // folder, then persist the maps if this run changed them.
+  // folder. The drops are applied to a fresh read of each map,
+  // so entries recorded since this run started (its own
+  // translations are already persisted; a concurrent on-demand
+  // store is possible too) survive the cleanup.
   for (const lang of ARTICLE_LANGS) {
     for (const id of Object.keys(langTitles[lang])) {
       if (!liveIdSet.has(id)) {
         delete langTitles[lang][id];
-        langTitlesDirty = true;
+        langTitlesRemoved[lang].add(id);
       }
     }
   }
-  if (langTitlesDirty) ARTICLE_LANGS.forEach((lang) => writeLangTitles_(lang, langTitles[lang]));
+  for (const lang of ARTICLE_LANGS) {
+    if (!langTitlesRemoved[lang].size) continue;
+    const entries = readLangTitles_(lang);
+    let changed = false;
+    for (const id of langTitlesRemoved[lang]) {
+      if (id in entries) {
+        delete entries[id];
+        changed = true;
+      }
+    }
+    if (changed) writeLangTitles_(lang, entries);
+  }
 
   pruneOrphanSnapshots_(allIds);
 
@@ -336,10 +372,7 @@ export const dailyRSSCache = () => {
     const allIds = cachedList ? JSON.parse(cachedList) : listDocIdsSortedByTitle_(config.folderId);
     if (!cachedList) log_('RSS Cache: No article list found in cache. Getting from Drive...');
 
-    // Pinned articles (PRE_CACHE_PINNED_IDS) stay in the RSS/OGP cache
-    // even when they fall outside the newest RSS_CACHE_LIMIT articles.
-    const targetIds = allIds.filter((id, index) => index < RSS_CACHE_LIMIT || config.pinnedIds.includes(id));
-    const itemsToSave = targetIds.map((id) => {
+    const itemsToSave = allIds.slice(0, RSS_CACHE_LIMIT).map((id) => {
       const cachedArticle = cache.get(id);
       if (cachedArticle) return JSON.parse(cachedArticle);
       const driveCached = readDriveArticleCache_(id);
@@ -729,6 +762,16 @@ export const writeLangTitles_ = (lang, entries) => {
   }
 };
 
+// Record one translated title in its language's map, reading the
+// map fresh and writing it straight back. A completed translation
+// is durable the moment it exists, and entries recorded by
+// another writer since the caller's own copy was read survive.
+export const recordLangTitle_ = (lang, id, entry) => {
+  const entries = readLangTitles_(lang);
+  entries[id] = entry;
+  writeLangTitles_(lang, entries);
+};
+
 // The { docId: translatedTitle } view of a language's titles map,
 // for the titles response.
 export const langTitlesMap_ = (lang) => {
@@ -758,8 +801,15 @@ const translateCall_ = (text, target) => {
   return result;
 };
 
-export const translateText_ = (text, target) => {
+// The optional deadline (epoch ms) bounds a whole article
+// translation: once it passes, the next call refuses with
+// 'Translation deadline exceeded' and the caller keeps the
+// previous snapshot, so a batch job translating many articles
+// can stop one huge article from consuming its entire budget.
+// Callers without a budget (on-demand reads) pass none.
+export const translateText_ = (text, target, deadline) => {
   if (!text) return text;
+  if (deadline && Date.now() > deadline) throw new Error('Translation deadline exceeded');
   return translateCall_(String(text), target);
 };
 
@@ -918,9 +968,11 @@ export const splitMarkdownSegments_ = (markdown) => {
  * travel newline-joined and are split back; a batch whose line
  * count does not survive the round trip is retried fragment by
  * fragment). Throws on any translation failure — callers keep
- * the previous snapshot in that case.
+ * the previous snapshot in that case. An optional deadline
+ * (epoch ms) aborts the translation between batches the same
+ * way, so a batch caller stays inside its time budget.
  */
-export const translateMarkdown_ = (markdown, target) => {
+export const translateMarkdown_ = (markdown, target, deadline) => {
   const segments = splitMarkdownSegments_(markdown);
   const units = [];
   segments.forEach((seg, i) => {
@@ -932,6 +984,7 @@ export const translateMarkdown_ = (markdown, target) => {
   let batchLen = 0;
   const flush = () => {
     if (!batch.length) return;
+    if (deadline && Date.now() > deadline) throw new Error('Translation deadline exceeded');
     const joined = batch.map((k) => units[k].text).join('\n');
     const lines = translateCall_(joined, target).split('\n');
     if (lines.length === batch.length) {
@@ -962,12 +1015,12 @@ export const translateMarkdown_ = (markdown, target) => {
   return segments.map((seg, i) => (seg.prose ? (translatedBySeg.get(i) ?? seg.text) : seg.text)).join('');
 };
 
-export const translateArticle_ = (article, lang) => {
+export const translateArticle_ = (article, lang, deadline) => {
   const target = LANG_TARGETS[lang];
   return {
     id: article.id,
-    title: translateText_(article.title, target),
-    markdown: translateMarkdown_(article.markdown, target),
+    title: translateText_(article.title, target, deadline),
+    markdown: translateMarkdown_(article.markdown, target, deadline),
     tags: article.tags,
   };
 };
@@ -981,12 +1034,10 @@ export const translateArticle_ = (article, lang) => {
 export const storeTranslatedArticle_ = (article, lang) => {
   const translated = translateArticle_(article, lang);
   writeDriveArticleLangCache_(translated, lang);
-  const entries = readLangTitles_(lang);
-  entries[article.id] = {
+  recordLangTitle_(lang, article.id, {
     title: translated.title,
     sourceModified: DriveApp.getFileById(article.id).getLastUpdated().getTime(),
-  };
-  writeLangTitles_(lang, entries);
+  });
   return translated;
 };
 
