@@ -70,6 +70,11 @@ export const preCacheAll = () => {
   // budget exemption. Pinned articles no longer need special
   // storage treatment (every article gets a snapshot now); they
   // are simply converted first.
+  // Translations ride on the same pass (see the translation
+  // section): an article converted here is translated here too,
+  // and an article whose Japanese snapshot is already fresh gets
+  // any missing or stale translation built from that snapshot —
+  // under the same deadline, so overflow defers to later runs.
   const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
   for (const id of config.pinnedIds) {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
@@ -95,6 +100,38 @@ export const preCacheAll = () => {
   docs.forEach((d) => { modifiedById[d.id] = d.modified; });
   const snapshotIndex = readSnapshotIndex_();
   let snapshotIndexDirty = false;
+  // Translated titles on record, per language. Their stamps are
+  // the freshness record for the language snapshots: an entry
+  // stamped with the Doc's current modified time means the
+  // translation was made from the current article.
+  const langTitles = { en: readLangTitles_('en'), zh: readLangTitles_('zh') };
+  let langTitlesDirty = false;
+  const langEntryFresh_ = (lang, id) => {
+    const entry = langTitles[lang][id];
+    return Boolean(entry && modifiedById[id] != null && entry.sourceModified === modifiedById[id]);
+  };
+  // (Re)build the language snapshots of one article whose current
+  // Japanese form is in hand. Languages already fresh are
+  // skipped; a language whose turn comes after the snapshot
+  // deadline is left stale for a later run (or an on-demand
+  // read), exactly like conversion itself. Failures keep the
+  // previous snapshot and are retried next run.
+  const ensureLangSnapshots_ = (id, article) => {
+    if (!article) return;
+    for (const lang of ARTICLE_LANGS) {
+      if (langEntryFresh_(lang, id)) continue;
+      if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
+      try {
+        const translated = translateArticle_(article, lang);
+        writeDriveArticleLangCache_(translated, lang);
+        langTitles[lang][id] = { title: translated.title, sourceModified: modifiedById[id] };
+        langTitlesDirty = true;
+        console.log(`Translated: ${translated.title} (${lang})`);
+      } catch (e) {
+        console.error(`Failed to translate ID:${id} (${lang}): ${e.message}`);
+      }
+    }
+  };
   // A rename also moves the Doc's modified time (forcing a
   // reconversion), but patch a drifted snapshot title in place as
   // well so it never has to wait for one.
@@ -103,6 +140,15 @@ export const preCacheAll = () => {
       writeDriveArticleCache_({ ...snapshot, title: titles[id] });
       snapshot.title = titles[id];
       console.log(`Snapshot title updated: ${titles[id]}`);
+      // The translations were made from the old title: drop
+      // their freshness stamps so the language pass below
+      // rebuilds them from the corrected article.
+      ARTICLE_LANGS.forEach((lang) => {
+        if (langTitles[lang][id]) {
+          delete langTitles[lang][id];
+          langTitlesDirty = true;
+        }
+      });
     }
   };
   const rememberIndex_ = (id, title, tags) => {
@@ -126,6 +172,15 @@ export const preCacheAll = () => {
           // so rememberIndex_ writes exactly the entry being refreshed.
           rememberIndex_(id, titles[id], entry.tags);
         }
+        // The Japanese snapshot is current, but a translation may
+        // be missing or stale (the first runs after translation
+        // shipped, or a title patch above): build it from the
+        // snapshot, reading the snapshot only when some language
+        // actually needs it.
+        if (ARTICLE_LANGS.some((lang) => !langEntryFresh_(lang, id))) {
+          snapshot = snapshot || readDriveArticleCache_(id);
+          if (snapshot) ensureLangSnapshots_(id, snapshot);
+        }
         continue;
       }
       const snapshot = readDriveArticleCache_(id);
@@ -134,6 +189,7 @@ export const preCacheAll = () => {
         patchSnapshotTitle_(snapshot, id);
         rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
+        ensureLangSnapshots_(id, snapshot);
         continue;
       }
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
@@ -143,6 +199,7 @@ export const preCacheAll = () => {
       convertedTags[id] = article.tags;
       writeDriveArticleCache_(article);
       rememberIndex_(id, title, article.tags);
+      ensureLangSnapshots_(id, article);
 
       const articlePayload = JSON.stringify(article);
       if (articlePayload.length < CACHE_SIZE_LIMIT) {
@@ -166,6 +223,18 @@ export const preCacheAll = () => {
     }
   }
   if (snapshotIndexDirty) writeSnapshotIndex_(snapshotIndex);
+
+  // Drop translated-title entries for articles that left the
+  // folder, then persist the maps if this run changed them.
+  for (const lang of ARTICLE_LANGS) {
+    for (const id of Object.keys(langTitles[lang])) {
+      if (!liveIdSet.has(id)) {
+        delete langTitles[lang][id];
+        langTitlesDirty = true;
+      }
+    }
+  }
+  if (langTitlesDirty) ARTICLE_LANGS.forEach((lang) => writeLangTitles_(lang, langTitles[lang]));
 
   pruneOrphanSnapshots_(allIds);
 
@@ -240,6 +309,18 @@ export const refreshArticleSnapshot = (docId) => {
   const cache = CacheService.getScriptCache();
   if (typeof cache.remove === 'function') cache.remove(docId);
   storeConvertedArticle_(article, cache);
+  // Refresh the translations from the same conversion, so a
+  // manual rebuild never leaves them serving the old text. A
+  // translation failure only logs: the Japanese snapshot is
+  // already stored, and the stale translation is rebuilt by the
+  // next preCacheAll run or language read.
+  for (const lang of ARTICLE_LANGS) {
+    try {
+      storeTranslatedArticle_(article, lang);
+    } catch (e) {
+      log_(`Snapshot translation failed (${lang}): ${e.message}`);
+    }
+  }
   console.log(`Snapshot refreshed: ${article.title}`);
   return article;
 };
@@ -374,9 +455,9 @@ export const getArticleCacheFolder_ = () => {
   return folders.hasNext() ? folders.next() : parent.createFolder(ARTICLE_CACHE_FOLDER_NAME);
 };
 
-export const readDriveArticleCache_ = (docId) => {
+const readSnapshotFile_ = (fileName, docId) => {
   try {
-    const files = getArticleCacheFolder_().getFilesByName(`${docId}.json`);
+    const files = getArticleCacheFolder_().getFilesByName(fileName);
     if (!files.hasNext()) return null;
     const data = JSON.parse(files.next().getBlob().getDataAsString('UTF-8'));
     const sourceModified = DriveApp.getFileById(docId).getLastUpdated().getTime();
@@ -389,6 +470,34 @@ export const readDriveArticleCache_ = (docId) => {
   } catch (e) {
     log_(`Drive article cache read failed (${docId}): ${e.message}`);
     return null;
+  }
+};
+
+export const readDriveArticleCache_ = (docId) => readSnapshotFile_(`${docId}.json`, docId);
+
+/** -----------------------------
+ *  Translated article snapshots: beside every Japanese snapshot
+ *  (<id>.json) the article-cache folder can hold one snapshot per
+ *  supported language (<id>.en.json / <id>.zh.json), in the same
+ *  JSON format and stamped with the same source Doc modified
+ *  time, so the freshness rule above applies unchanged: a
+ *  translation is served only while the Doc it was made from is
+ *  still current. See the translation section below.
+ *  ----------------------------- */
+export const ARTICLE_LANGS = ['en', 'zh'];
+// LanguageApp target codes per article language.
+export const LANG_TARGETS = { en: 'en', zh: 'zh-CN' };
+
+export const langSnapshotFileName_ = (docId, lang) => `${docId}.${lang}.json`;
+
+export const readDriveArticleLangCache_ = (docId, lang) => readSnapshotFile_(langSnapshotFileName_(docId, lang), docId);
+
+export const writeDriveArticleLangCache_ = (article, lang) => {
+  try {
+    const sourceModified = DriveApp.getFileById(article.id).getLastUpdated().getTime();
+    writeJsonFile_(langSnapshotFileName_(article.id, lang), JSON.stringify({ ...article, sourceModified }));
+  } catch (e) {
+    log_(`Drive article cache write failed (${article.id}, ${lang}): ${e.message}`);
   }
 };
 
@@ -512,21 +621,35 @@ export const storeConvertedArticle_ = (article, cache) => {
 /**
  * Remove snapshot files whose source Doc is no longer in the
  * article folder (deleted or moved away), so the cache folder
- * only ever holds live articles. tags.json, the snapshot index
- * and the OGP dispatch record live in the same folder but are
- * not article snapshots and are always kept.
+ * only ever holds live articles. tags.json, the snapshot index,
+ * the OGP dispatch record and the translated-title maps live in
+ * the same folder but are not article snapshots and are always
+ * kept; translated snapshots belong to their article.
  */
 export const pruneOrphanSnapshots_ = (liveIds) => {
   try {
     const folder = getArticleCacheFolder_();
     if (typeof folder.getFiles !== 'function') return;
     const live = new Set(liveIds);
+    const keep = new Set([
+      TAGS_FILE_NAME, SNAPSHOT_INDEX_FILE_NAME, OGP_DISPATCH_FILE_NAME,
+      TITLES_LANG_FILE_NAMES.en, TITLES_LANG_FILE_NAMES.zh,
+    ]);
     const files = folder.getFiles();
     while (files.hasNext()) {
       const file = files.next();
       const name = file.getName();
-      if (name === TAGS_FILE_NAME || name === SNAPSHOT_INDEX_FILE_NAME || name === OGP_DISPATCH_FILE_NAME || !name.endsWith('.json')) continue;
-      if (!live.has(name.slice(0, -'.json'.length))) file.setTrashed(true);
+      if (keep.has(name) || !name.endsWith('.json')) continue;
+      // A translated snapshot (<id>.en.json / <id>.zh.json) belongs
+      // to its article just like the Japanese snapshot does.
+      let base = name.slice(0, -'.json'.length);
+      for (const lang of ARTICLE_LANGS) {
+        if (base.endsWith(`.${lang}`)) {
+          base = base.slice(0, -lang.length - 1);
+          break;
+        }
+      }
+      if (!live.has(base)) file.setTrashed(true);
     }
   } catch (e) {
     log_(`Snapshot prune failed: ${e.message}`);
@@ -553,6 +676,358 @@ export const writeDriveTagsMap_ = (tags) => {
     writeJsonFile_(TAGS_FILE_NAME, JSON.stringify(tags));
   } catch (e) {
     log_(`Drive tags map write failed: ${e.message}`);
+  }
+};
+
+/** -----------------------------
+ *  Article translation (en / zh): articles are served in English
+ *  or Simplified Chinese through the same endpoints, selected
+ *  with a `lang` request parameter (`en` / `zh`; anything else —
+ *  including `ja` and a missing parameter — is the Japanese
+ *  behaviour, unchanged). Translation uses the built-in
+ *  LanguageApp, so there are no external services, keys or
+ *  properties to configure.
+ *
+ *  Translated articles are stored as snapshots beside the
+ *  Japanese ones (see readDriveArticleLangCache_) and follow the
+ *  same freshness rule, so a translation is only ever produced
+ *  from a current Japanese article: when an article is
+ *  (re)converted, preCacheAll refreshes its translations too, and
+ *  a language read that finds no fresh translation makes one on
+ *  demand from the fresh Japanese article. A failed translation
+ *  never overwrites an existing snapshot — the previous one is
+ *  kept and the next cycle retries.
+ *
+ *  The titles endpoint cannot translate per request, so the
+ *  translated titles live in small per-language maps in the
+ *  article-cache folder (titles-en.json / titles-zh.json), each
+ *  entry stamped with the source Doc's modified time:
+ *  { [docId]: { title, sourceModified } }. The stamps double as
+ *  the freshness record preCacheAll checks before re-translating
+ *  an article it did not convert itself.
+ *  ----------------------------- */
+export const TITLES_LANG_FILE_NAMES = { en: 'titles-en.json', zh: 'titles-zh.json' };
+// Per-call character budget for LanguageApp: calls are batched
+// across prose fragments, and longer articles are chunked, so no
+// single call carries a whole article.
+export const TRANSLATE_CHUNK_CHARS = 4000;
+
+// The `lang` request parameter: only the exact values 'en' and
+// 'zh' select a translation; everything else is Japanese.
+export const articleLangOf_ = (value) => (value === 'en' || value === 'zh' ? value : null);
+
+export const readLangTitles_ = (lang) => readJsonFile_(TITLES_LANG_FILE_NAMES[lang], {}, 'Translated titles');
+
+export const writeLangTitles_ = (lang, entries) => {
+  try {
+    writeJsonFile_(TITLES_LANG_FILE_NAMES[lang], JSON.stringify(entries));
+  } catch (e) {
+    log_(`Translated titles write failed (${lang}): ${e.message}`);
+  }
+};
+
+// The { docId: translatedTitle } view of a language's titles map,
+// for the titles response.
+export const langTitlesMap_ = (lang) => {
+  const entries = readLangTitles_(lang);
+  const map = {};
+  Object.keys(entries).forEach((id) => {
+    const entry = entries[id];
+    if (entry && typeof entry.title === 'string' && entry.title) map[id] = entry.title;
+  });
+  return map;
+};
+
+// Titles for a `?o=titles&lang=` response: the translated title
+// where one is on record, the Japanese title everywhere else.
+export const translatedTitlesFor_ = (ids, titles, lang) => {
+  const translated = langTitlesMap_(lang);
+  const merged = {};
+  ids.forEach((id) => { merged[id] = translated[id] || titles[id]; });
+  return merged;
+};
+
+const translateCall_ = (text, target) => {
+  const result = LanguageApp.translate(text, 'ja', target);
+  if (typeof result !== 'string' || (text.trim() && !result.trim())) {
+    throw new Error('LanguageApp returned an empty translation');
+  }
+  return result;
+};
+
+export const translateText_ = (text, target) => {
+  if (!text) return text;
+  return translateCall_(String(text), target);
+};
+
+// Split a prose fragment that alone exceeds the per-call budget:
+// at sentence boundaries where possible, hard at the limit
+// otherwise. The parts rejoin with no separator.
+export const splitLongText_ = (text, limit) => {
+  const parts = [];
+  let rest = String(text);
+  while (rest.length > limit) {
+    const window = rest.slice(0, limit);
+    let cut = Math.max(
+      window.lastIndexOf('。'), window.lastIndexOf('！'), window.lastIndexOf('？'),
+      window.lastIndexOf('、'), window.lastIndexOf('. '),
+    );
+    cut = cut >= Math.floor(limit * 0.3) ? cut + 1 : limit;
+    parts.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest) parts.push(rest);
+  return parts;
+};
+
+/** -----------------------------
+ *  Markdown protection: only prose is translated. The markdown
+ *  is split into segments whose concatenation is the input, byte
+ *  for byte; protected segments never enter a LanguageApp call,
+ *  so they survive exactly:
+ *   - fenced code blocks and inline code spans
+ *   - URLs: bare-URL paragraphs (they become link cards), bare
+ *     URLs inside prose, and link/image destinations — link and
+ *     alt TEXT is translated, the destination never is
+ *   - raw HTML: link-card blocks, music-track divs, grayout
+ *     <img> lines, and any inline tag
+ *   - [[...]] markers ([[目次]] and friends), full-width included
+ *   - lyrics: the blocks following a [[歌詞]] marker, delimited
+ *     by the same rule the front end boxes them with
+ *     (isLyricBlock_) — quoted creative content, never translated
+ *   - table separator rows and the structural prefixes of
+ *     headings, list items and blockquotes
+ *  ----------------------------- */
+const LYRICS_MARKERS_ = new Set(['[[歌詞]]', '［［歌詞］］']);
+
+// Mirrors the front end's lyric-line test (wrapLyricsBlocks in
+// the blog's markdown service): a block under a [[歌詞]] marker
+// is a lyric line while it satisfies all of these.
+export const isLyricBlock_ = (block) => Boolean(block)
+  && block.length <= 40
+  && !block.startsWith('#')
+  && !block.startsWith('<')
+  && !block.startsWith('[[')
+  && !block.includes('](')
+  && !block.endsWith('。');
+
+const INLINE_PROTECTED_RE_ = /(`+[^`]*`+)|(!?)\[([^\]]*)\]\(([^)]*)\)|(https?:\/\/\S+)|\[\[[^\]]*\]\]|［［[^］]*］］|(<[^>]*>)/g;
+const LINE_PREFIX_RE_ = /^(#{1,6}\s+|\s*(?:[-*+]|\d+\.)\s+|\s*>\s?)/;
+const TABLE_SEPARATOR_RE_ = /^\|?[\s:|-]+\|$/;
+
+// Split one prose line into prose and protected pieces: the
+// structural prefix and any inline code, link/image destination,
+// bare URL, marker or HTML tag are protected; link text between
+// them stays prose.
+const splitProseLine_ = (line, segments) => {
+  let rest = line;
+  const prefix = rest.match(LINE_PREFIX_RE_);
+  if (prefix) {
+    segments.push({ text: prefix[0], prose: false });
+    rest = rest.slice(prefix[0].length);
+  }
+  let last = 0;
+  INLINE_PROTECTED_RE_.lastIndex = 0;
+  let m;
+  while ((m = INLINE_PROTECTED_RE_.exec(rest)) !== null) {
+    if (m.index > last) segments.push({ text: rest.slice(last, m.index), prose: true });
+    if (m[2] !== undefined) {
+      // A link or image: [text](destination) — the text is prose,
+      // the brackets and destination are protected.
+      segments.push({ text: `${m[2]}[`, prose: false });
+      if (m[3]) segments.push({ text: m[3], prose: true });
+      segments.push({ text: `](${m[4]})`, prose: false });
+    } else {
+      segments.push({ text: m[0], prose: false });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < rest.length) segments.push({ text: rest.slice(last), prose: true });
+};
+
+export const splitMarkdownSegments_ = (markdown) => {
+  const parts = String(markdown || '').split(/(\n{2,})/);
+  const segments = [];
+  let fenceOpen = false;
+  let inLyrics = false;
+  parts.forEach((part) => {
+    if (!part) return;
+    if (/^\n{2,}$/.test(part)) {
+      segments.push({ text: part, prose: false });
+      return;
+    }
+    const trimmed = part.trim();
+    // A block touched by a code fence (opened earlier, opening or
+    // closing here) is protected as a whole.
+    let fenced = fenceOpen;
+    part.split('\n').forEach((line) => {
+      if (line.trimStart().startsWith('```')) {
+        fenced = true;
+        fenceOpen = !fenceOpen;
+      }
+    });
+    if (fenced) {
+      segments.push({ text: part, prose: false });
+      return;
+    }
+    if (inLyrics) {
+      if (isLyricBlock_(trimmed)) {
+        segments.push({ text: part, prose: false });
+        return;
+      }
+      inLyrics = false;
+    }
+    if (LYRICS_MARKERS_.has(trimmed)) {
+      segments.push({ text: part, prose: false });
+      inLyrics = true;
+      return;
+    }
+    if (trimmed.startsWith('<')
+      || /^\[\[[^\]]*\]\]$/.test(trimmed)
+      || /^［［[^］]*］］$/.test(trimmed)
+      || /^https?:\/\/\S+$/.test(trimmed)) {
+      segments.push({ text: part, prose: false });
+      return;
+    }
+    // Prose block: translate line by line, keeping whole-line
+    // HTML, bare URLs, markers and table separators protected.
+    part.split('\n').forEach((line, i, lines) => {
+      if (i > 0) segments.push({ text: '\n', prose: false });
+      const lineTrimmed = line.trim();
+      if (lineTrimmed.startsWith('<')
+        || /^\[\[[^\]]*\]\]$/.test(lineTrimmed)
+        || /^［［[^］]*］］$/.test(lineTrimmed)
+        || /^https?:\/\/\S+$/.test(lineTrimmed)
+        || TABLE_SEPARATOR_RE_.test(lineTrimmed)) {
+        segments.push({ text: line, prose: false });
+        return;
+      }
+      splitProseLine_(line, segments);
+    });
+  });
+  return segments;
+};
+
+/**
+ * Translate a markdown document from Japanese to `target` (a
+ * LanguageApp target code). Prose fragments are batched into
+ * LanguageApp calls of at most TRANSLATE_CHUNK_CHARS (fragments
+ * travel newline-joined and are split back; a batch whose line
+ * count does not survive the round trip is retried fragment by
+ * fragment). Throws on any translation failure — callers keep
+ * the previous snapshot in that case.
+ */
+export const translateMarkdown_ = (markdown, target) => {
+  const segments = splitMarkdownSegments_(markdown);
+  const units = [];
+  segments.forEach((seg, i) => {
+    if (!seg.prose) return;
+    splitLongText_(seg.text, TRANSLATE_CHUNK_CHARS).forEach((piece) => units.push({ seg: i, text: piece }));
+  });
+  const results = new Array(units.length);
+  let batch = [];
+  let batchLen = 0;
+  const flush = () => {
+    if (!batch.length) return;
+    const joined = batch.map((k) => units[k].text).join('\n');
+    const lines = translateCall_(joined, target).split('\n');
+    if (lines.length === batch.length) {
+      batch.forEach((k, j) => { results[k] = lines[j]; });
+    } else {
+      batch.forEach((k) => { results[k] = translateCall_(units[k].text, target); });
+    }
+    batch = [];
+    batchLen = 0;
+  };
+  units.forEach((u, k) => {
+    // Fragments without letters (numbers, punctuation) need no
+    // translation and pass through as they are.
+    if (!/[\p{L}]/u.test(u.text)) {
+      results[k] = u.text;
+      return;
+    }
+    const need = u.text.length + (batch.length ? 1 : 0);
+    if (batch.length && batchLen + need > TRANSLATE_CHUNK_CHARS) flush();
+    batch.push(k);
+    batchLen += need;
+  });
+  flush();
+  const translatedBySeg = new Map();
+  units.forEach((u, k) => {
+    translatedBySeg.set(u.seg, (translatedBySeg.get(u.seg) || '') + results[k]);
+  });
+  return segments.map((seg, i) => (seg.prose ? (translatedBySeg.get(i) ?? seg.text) : seg.text)).join('');
+};
+
+export const translateArticle_ = (article, lang) => {
+  const target = LANG_TARGETS[lang];
+  return {
+    id: article.id,
+    title: translateText_(article.title, target),
+    markdown: translateMarkdown_(article.markdown, target),
+    tags: article.tags,
+  };
+};
+
+/**
+ * Translate a Japanese article into `lang`, store the language
+ * snapshot, and record the translated title in the language's
+ * titles map. Throws when translation fails (nothing is stored
+ * then, so a previous snapshot survives).
+ */
+export const storeTranslatedArticle_ = (article, lang) => {
+  const translated = translateArticle_(article, lang);
+  writeDriveArticleLangCache_(translated, lang);
+  const entries = readLangTitles_(lang);
+  entries[article.id] = {
+    title: translated.title,
+    sourceModified: DriveApp.getFileById(article.id).getLastUpdated().getTime(),
+  };
+  writeLangTitles_(lang, entries);
+  return translated;
+};
+
+// The current Japanese article for the language read path: the
+// CacheService payload when usable, then the Drive snapshot,
+// then a fresh conversion (stored like any request-time
+// conversion). The Japanese doGet path keeps its own flow; this
+// helper only serves translations, so the Japanese responses are
+// untouched.
+const getJapaneseArticle_ = (docId, info, cache) => {
+  const cachedDoc = cache.get(docId);
+  if (cachedDoc) {
+    try {
+      const parsed = JSON.parse(cachedDoc);
+      if (parsed && Array.isArray(parsed.tags)) return parsed;
+    } catch (e) { /* convert below */ }
+  }
+  const driveCached = readDriveArticleCache_(docId);
+  if (driveCached) return driveCached;
+  const doc = DocumentApp.openById(docId);
+  const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+  storeConvertedArticle_(article, cache);
+  return article;
+};
+
+/**
+ * An article in language `lang`: the fresh language snapshot
+ * when one exists, otherwise a translation of the current
+ * Japanese article, made and stored on the spot. A translation
+ * failure falls back to the Japanese article (logged) rather
+ * than failing the read.
+ */
+export const getArticleForLang_ = (docId, info, lang, cache) => {
+  const langCached = readDriveArticleLangCache_(docId, lang);
+  if (langCached) {
+    log_(`Document (ID:${docId}) retrieved from Drive cache (${lang})`);
+    return langCached;
+  }
+  const article = getJapaneseArticle_(docId, info, cache);
+  try {
+    return storeTranslatedArticle_(article, lang);
+  } catch (e) {
+    log_(`Document (ID:${docId}) translation failed (${lang}): ${e.message}`);
+    return article;
   }
 };
 
@@ -839,8 +1314,12 @@ export const listIdsAndTitles_ = (cache) => {
  * Return cache if exists, otherwise generate on the fly
  */
 export const doGet = (e) => {
-  const { id: docId, o: output } = (e && e.parameter) || {};
+  const { id: docId, o: output, lang: langParam } = (e && e.parameter) || {};
   if (output === 'rss') return generateRSSResponse_();
+  // Only the exact values en/zh select a translation; no lang,
+  // lang=ja and anything else keep the Japanese behaviour below,
+  // byte for byte.
+  const lang = articleLangOf_(langParam);
 
   const cache = CacheService.getScriptCache();
   const config = getConfig_();
@@ -850,7 +1329,8 @@ export const doGet = (e) => {
   // even when the article cache is cold.
   if (output === 'titles') {
     const { ids, titles } = listIdsAndTitles_(cache);
-    return json_({ ids, titles, tags: getTagsMap_(ids, cache, { scanDocs: false }) });
+    const servedTitles = lang ? translatedTitlesFor_(ids, titles, lang) : titles;
+    return json_({ ids, titles: servedTitles, tags: getTagsMap_(ids, cache, { scanDocs: false }) });
   }
 
   if (!docId) {
@@ -889,6 +1369,11 @@ export const doGet = (e) => {
   // before trusting any cache.
   const info = getDocInfoInFolder_(config.folderId, docId);
   if (!info.exists) return jsonError_('Document not found');
+
+  // Translated reads have their own store (the language
+  // snapshots); the Japanese caches below are keyed by document
+  // id alone and must never serve a language request.
+  if (lang) return json_(getArticleForLang_(docId, info, lang, cache));
 
   const cachedDoc = cache.get(docId);
   if (cachedDoc) {
