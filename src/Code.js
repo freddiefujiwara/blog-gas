@@ -56,16 +56,20 @@ export const preCacheAll = () => {
     console.error(`Failed to save list: ${e.message}`);
   }
 
-  // Two layers are warmed here. The Drive snapshot layer is the
-  // durable one: every article whose snapshot is missing or older
-  // than its Doc is (re)converted and stored, so reads never have
-  // to convert (readDriveArticleCache_ holds the freshness rule).
-  // The CacheService layer stays a short-lived hot set — the
-  // newest PRE_CACHE_LIMIT articles, plus any pinned articles
-  // (PRE_CACHE_PINNED_IDS) — served straight from the cache while
-  // it lasts. Pinned articles no longer need special storage
-  // treatment (every article gets a snapshot now); they are simply
-  // converted first.
+  // Two layers are maintained here. The Drive snapshot layer is
+  // the durable one: every article whose snapshot is missing or
+  // older than its Doc is (re)converted and stored, so reads never
+  // have to convert (readDriveArticleCache_ holds the freshness
+  // rule). The CacheService layer is only a by-product of
+  // conversion: an article converted in this run is also put into
+  // CacheService when it belongs to the hot set below, while
+  // unchanged articles are not re-warmed — reads serve them from
+  // their Drive snapshots instead. The hot set (the newest
+  // PRE_CACHE_LIMIT articles, plus any pinned articles,
+  // PRE_CACHE_PINNED_IDS) now only decides conversion order and
+  // budget exemption. Pinned articles no longer need special
+  // storage treatment (every article gets a snapshot now); they
+  // are simply converted first.
   const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
   for (const id of config.pinnedIds) {
     if (allIds.includes(id) && !targetIds.includes(id)) targetIds.push(id);
@@ -82,8 +86,8 @@ export const preCacheAll = () => {
   // Freshness is decided from the snapshot index (one small file)
   // instead of downloading every snapshot just to compare stamps:
   // an entry whose stamp still matches the Doc's modified time is
-  // served as-is, and its snapshot is only opened when the article
-  // belongs to the hot set or its title drifted. Articles the
+  // served as-is, and its snapshot is only opened when its title
+  // drifted. Articles the
   // index does not know (or cannot date) fall back to reading the
   // snapshot itself, exactly as before, and backfill their entry
   // so the next run stays cheap.
@@ -100,12 +104,6 @@ export const preCacheAll = () => {
       snapshot.title = titles[id];
       console.log(`Snapshot title updated: ${titles[id]}`);
     }
-  };
-  // Serve a snapshot through the hot CacheService layer when it fits.
-  const warmHotCache_ = (id, snapshot) => {
-    if (!snapshot) return;
-    const payload = JSON.stringify(snapshot);
-    if (payload.length < CACHE_SIZE_LIMIT) cache.put(id, payload, CACHE_TTL);
   };
   const rememberIndex_ = (id, title, tags) => {
     if (modifiedById[id] == null) return;
@@ -128,10 +126,6 @@ export const preCacheAll = () => {
           // so rememberIndex_ writes exactly the entry being refreshed.
           rememberIndex_(id, titles[id], entry.tags);
         }
-        if (targetSet.has(id)) {
-          snapshot = snapshot || readDriveArticleCache_(id);
-          warmHotCache_(id, snapshot);
-        }
         continue;
       }
       const snapshot = readDriveArticleCache_(id);
@@ -140,7 +134,6 @@ export const preCacheAll = () => {
         patchSnapshotTitle_(snapshot, id);
         rememberIndex_(id, snapshot.title, snapshot.tags);
         convertedTags[id] = snapshot.tags;
-        if (targetSet.has(id)) warmHotCache_(id, snapshot);
         continue;
       }
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
