@@ -3876,6 +3876,88 @@ describe('Music markers', () => {
       });
     });
 
+    describe('TRANSLATE_BACKFILL_LIMIT', () => {
+      const docFile = (id, name) => ({ getId: () => id, getName: () => name, getLastUpdated: () => new Date(MODIFIED) });
+      // Two already-fresh articles, newest first in list order,
+      // neither translated yet: only the backfill has work to do.
+      const seedTwoFreshArticles = () => {
+        const index = {
+          'doc-new': { sourceModified: MODIFIED, title: '2026-11-19 新記事', tags: [] },
+          'doc-old': { sourceModified: MODIFIED, title: '2026-11-18 旧記事', tags: [] },
+        };
+        stored.set('index.json', makeFile('index.json', JSON.stringify(index)));
+        stored.set('doc-new.json', makeFile('doc-new.json', JSON.stringify({ id: 'doc-new', title: '2026-11-19 新記事', markdown: '新しい本文です\n', tags: [], sourceModified: MODIFIED })));
+        stored.set('doc-old.json', makeFile('doc-old.json', JSON.stringify({ id: 'doc-old', title: '2026-11-18 旧記事', markdown: '古い本文です\n', tags: [], sourceModified: MODIFIED })));
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([
+          docFile('doc-new', '2026-11-19 新記事'),
+          docFile('doc-old', '2026-11-18 旧記事'),
+        ]));
+      };
+      const setLimit = (value) => {
+        mockProperties.getProperty.mockImplementation((key) =>
+          key === 'TRANSLATE_BACKFILL_LIMIT' ? value : (TEST_CONFIG[key] ?? null));
+      };
+
+      beforeEach(() => {
+        mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      });
+
+      it('with the limit set to 1, backfills only the newest article', () => {
+        seedTwoFreshArticles();
+        setLimit('1');
+
+        Code.preCacheAll();
+
+        expect(stored.has('doc-new.en.json')).toBe(true);
+        expect(stored.has('doc-new.zh.json')).toBe(true);
+        expect(JSON.parse(stored.get('doc-new.en.json').content).markdown).toBe('[en]新しい本文です\n');
+        expect(stored.has('doc-old.en.json')).toBe(false);
+        expect(stored.has('doc-old.zh.json')).toBe(false);
+        expect(JSON.parse(stored.get('titles-en.json').content)['doc-old']).toBeUndefined();
+        expect(JSON.parse(stored.get('titles-zh.json').content)['doc-old']).toBeUndefined();
+        // The older article's text never reached the translator.
+        for (const call of mockLanguageApp.translate.mock.calls) {
+          expect(call[0]).not.toContain('古い本文');
+          expect(call[0]).not.toContain('旧記事');
+        }
+      });
+
+      it('with the limit unset, backfills every article', () => {
+        seedTwoFreshArticles();
+        // This describe tree has no outer beforeEach resetting
+        // the property mock, so pin the unset state explicitly.
+        setLimit(null);
+
+        Code.preCacheAll();
+
+        expect(stored.has('doc-new.en.json')).toBe(true);
+        expect(stored.has('doc-old.en.json')).toBe(true);
+        expect(stored.has('doc-old.zh.json')).toBe(true);
+      });
+
+      it('with an invalid limit value, backfills every article', () => {
+        seedTwoFreshArticles();
+        setLimit('abc');
+
+        Code.preCacheAll();
+
+        expect(stored.has('doc-new.en.json')).toBe(true);
+        expect(stored.has('doc-old.en.json')).toBe(true);
+      });
+
+      it('does not limit the read path: an older article still translates on demand', () => {
+        stored.set('doc-old.json', makeFile('doc-old.json', JSON.stringify({ id: 'doc-old', title: '題名', markdown: '本文です\n', tags: [], sourceModified: MODIFIED })));
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+        mockDriveApp.getFileById.mockReturnValue(memberFile('Doc Old'));
+        setLimit('1');
+
+        Code.doGet({ parameter: { id: 'doc-old', lang: 'en' } });
+
+        expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"[en]題名"'));
+        expect(stored.has('doc-old.en.json')).toBe(true);
+      });
+    });
+
     describe('pruneOrphanSnapshots_ with translations', () => {
       it('keeps language snapshots of live articles and the titles maps, trashes orphans', () => {
         stored.set('live-id.json', makeFile('live-id.json', '{}'));

@@ -88,6 +88,18 @@ export const preCacheAll = () => {
   const snapshotDeadline = Date.now() + SNAPSHOT_BUDGET_MS;
   const convertedTags = {};
 
+  // A project can cap the translation backfill with the
+  // TRANSLATE_BACKFILL_LIMIT script property: when it holds a
+  // positive integer N, only the first N articles in list order
+  // (newest first) are considered for translation in this pass.
+  // The staging project sets it to 1 — it only previews the
+  // newest draft — so its runs stop competing with production
+  // for the account-wide LanguageApp daily quota. Unset, empty
+  // or invalid means no limit. The read path is unaffected: an
+  // article opened directly is still translated on demand.
+  const backfillLimit = Number.parseInt(scriptProperty_('TRANSLATE_BACKFILL_LIMIT'), 10);
+  const backfillIds = backfillLimit > 0 ? new Set(allIds.slice(0, backfillLimit)) : null;
+
   // Freshness is decided from the snapshot index (one small file)
   // instead of downloading every snapshot just to compare stamps:
   // an entry whose stamp still matches the Doc's modified time is
@@ -126,9 +138,12 @@ export const preCacheAll = () => {
   // previous snapshot and are retried next run. The language
   // order alternates with the article's position, so when the
   // budget runs out mid-article the unfinished language is not
-  // always the same one.
+  // always the same one. Articles outside the
+  // TRANSLATE_BACKFILL_LIMIT window (backfillIds) are skipped
+  // entirely.
   const ensureLangSnapshots_ = (id, article, position) => {
     if (!article) return;
+    if (backfillIds && !backfillIds.has(id)) return;
     const langs = position % 2 === 0 ? ARTICLE_LANGS : [...ARTICLE_LANGS].reverse();
     for (const lang of langs) {
       if (langEntryFresh_(lang, id)) continue;
