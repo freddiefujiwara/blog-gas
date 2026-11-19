@@ -3979,3 +3979,192 @@ describe('Music markers', () => {
     });
   });
 });
+
+describe('Translation status endpoint', () => {
+  const MODIFIED = 1700000000000;
+  // File name -> every copy under that name (duplicates included).
+  const stored = new Map();
+  let copySeq = 0;
+  let docFiles = [];
+  const makeFile = (name, content) => {
+    const fid = `file-${++copySeq}`;
+    return {
+      name,
+      content,
+      getId: () => fid,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+      setTrashed: vi.fn(),
+    };
+  };
+  const putFile = (name, data) => {
+    const content = typeof data === 'string' ? data : JSON.stringify(data);
+    const f = makeFile(name, content);
+    stored.set(name, [...(stored.get(name) || []), f]);
+    return f;
+  };
+  const putSnapshot = (id, lang, sourceModified) =>
+    putFile(lang ? `${id}.${lang}.json` : `${id}.json`,
+      { id, title: 'T', markdown: 'MD', tags: [], sourceModified });
+  const cacheFolder = {
+    getFilesByName: vi.fn((name) => {
+      const copies = stored.get(name) || [];
+      let i = 0;
+      return { hasNext: () => i < copies.length, next: () => copies[i++] };
+    }),
+    createFile: vi.fn((name, content) => putFile(name, content)),
+  };
+  const docFile = (id, title) => ({
+    getId: () => id,
+    getName: () => title,
+    getLastUpdated: () => new Date(MODIFIED),
+  });
+  const callStatus = () => {
+    Code.doGet({ parameter: { o: 'translation-status' } });
+    const call = mockContentService.createTextOutput.mock.calls.at(-1);
+    return JSON.parse(call[0]);
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stored.clear();
+    docFiles = [];
+    copySeq = 0;
+    mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
+    mockContentService.createTextOutput.mockReturnValue({ setMimeType: vi.fn().mockReturnThis() });
+    mockDriveApp.getFolderById.mockImplementation(() => ({
+      getFilesByType: vi.fn(() => {
+        const files = [...docFiles];
+        let i = 0;
+        return { hasNext: () => i < files.length, next: () => files[i++] };
+      }),
+      getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+    }));
+  });
+
+  it('reports every article fresh when both language snapshots match the Japanese snapshot', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A'), docFile('id-b', '2026-01-02 B')];
+    for (const id of ['id-a', 'id-b']) {
+      putSnapshot(id, null, MODIFIED);
+      putSnapshot(id, 'en', MODIFIED);
+      putSnapshot(id, 'zh', MODIFIED);
+    }
+
+    const status = callStatus();
+
+    expect(Number.isNaN(Date.parse(status.generatedAt))).toBe(false);
+    expect(status.total).toBe(2);
+    expect(status.languages).toEqual({
+      en: { fresh: 2, stale: 0, missing: 0 },
+      zh: { fresh: 2, stale: 0, missing: 0 },
+    });
+    // Newest first, the titles-list order.
+    expect(status.articles).toEqual([
+      { id: 'id-b', title: '2026-01-02 B', en: 'fresh', zh: 'fresh' },
+      { id: 'id-a', title: '2026-01-01 A', en: 'fresh', zh: 'fresh' },
+    ]);
+  });
+
+  it('marks a language stale when its snapshot was made from an older Japanese snapshot', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED - 1);
+    putSnapshot('id-a', 'zh', MODIFIED);
+
+    const status = callStatus();
+
+    expect(status.articles).toEqual([
+      { id: 'id-a', title: '2026-01-01 A', en: 'stale', zh: 'fresh' },
+    ]);
+    expect(status.languages.en).toEqual({ fresh: 0, stale: 1, missing: 0 });
+    expect(status.languages.zh).toEqual({ fresh: 1, stale: 0, missing: 0 });
+  });
+
+  it('marks a language missing when no snapshot exists for it', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED);
+
+    const status = callStatus();
+
+    expect(status.articles).toEqual([
+      { id: 'id-a', title: '2026-01-01 A', en: 'fresh', zh: 'missing' },
+    ]);
+    expect(status.languages.zh).toEqual({ fresh: 0, stale: 0, missing: 1 });
+  });
+
+  it('keeps the summary counts consistent with the per-article list', () => {
+    docFiles = [
+      docFile('id-a', '2026-01-03 A'),
+      docFile('id-b', '2026-01-02 B'),
+      docFile('id-c', '2026-01-01 C'),
+    ];
+    // id-a: both fresh. id-b: en stale, zh missing. id-c: en missing, zh fresh.
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED);
+    putSnapshot('id-a', 'zh', MODIFIED);
+    putSnapshot('id-b', null, MODIFIED);
+    putSnapshot('id-b', 'en', MODIFIED - 5);
+    putSnapshot('id-c', null, MODIFIED);
+    putSnapshot('id-c', 'zh', MODIFIED);
+
+    const status = callStatus();
+
+    expect(status.total).toBe(3);
+    for (const lang of ['en', 'zh']) {
+      const counts = { fresh: 0, stale: 0, missing: 0 };
+      status.articles.forEach((a) => { counts[a[lang]] += 1; });
+      expect(status.languages[lang]).toEqual(counts);
+      expect(counts.fresh + counts.stale + counts.missing).toBe(status.total);
+    }
+    expect(status.languages.en).toEqual({ fresh: 1, stale: 1, missing: 1 });
+    expect(status.languages.zh).toEqual({ fresh: 2, stale: 0, missing: 1 });
+  });
+
+  it('ignores the language titles stamps: a fresh-looking stamp cannot override a stale or missing snapshot', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED - 1);
+    // The titles maps claim both languages are current; the
+    // snapshots say otherwise (en stale, zh absent), and the
+    // snapshots are the truth the read path acts on.
+    putFile('titles-en.json', { 'id-a': { title: 'A EN', sourceModified: MODIFIED } });
+    putFile('titles-zh.json', { 'id-a': { title: 'A ZH', sourceModified: MODIFIED } });
+
+    const status = callStatus();
+
+    expect(status.articles).toEqual([
+      { id: 'id-a', title: '2026-01-01 A', en: 'stale', zh: 'missing' },
+    ]);
+  });
+
+  it('picks the canonical Japanese copy via the snapshot index when duplicates exist', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    // An old duplicate and the current copy; the index points at
+    // the current one, so a translation made from the old copy
+    // is stale and one made from the current copy is fresh.
+    putSnapshot('id-a', null, MODIFIED - 100);
+    putSnapshot('id-a', null, MODIFIED);
+    putFile('index.json', { 'id-a': { sourceModified: MODIFIED, title: '2026-01-01 A', tags: [] } });
+    putSnapshot('id-a', 'en', MODIFIED);
+    putSnapshot('id-a', 'zh', MODIFIED - 100);
+
+    const status = callStatus();
+
+    expect(status.articles).toEqual([
+      { id: 'id-a', title: '2026-01-01 A', en: 'fresh', zh: 'stale' },
+    ]);
+  });
+
+  it('falls back to the newest Japanese copy when the index has no entry for the article', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED - 100);
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED);
+
+    const status = callStatus();
+
+    expect(status.articles[0].en).toBe('fresh');
+  });
+});
