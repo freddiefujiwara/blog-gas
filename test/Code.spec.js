@@ -2654,6 +2654,27 @@ describe('Code.js', () => {
       expect(JSON.parse(tagsCall[1])['doc-x']).toEqual(['運営']);
     });
 
+    it('preCacheAll warms only articles converted in this run, not fresh hot-set ones', () => {
+      const freshFile = { getId: () => 'doc-fresh', getName: () => 'Fresh Doc', getLastUpdated: () => new Date(MODIFIED) };
+      const newFile = { getId: () => 'doc-new', getName: () => 'New Doc', getLastUpdated: () => new Date(MODIFIED) };
+      stored.set('index.json', makeFile('index.json', JSON.stringify({ 'doc-fresh': { sourceModified: MODIFIED, title: 'Fresh Doc', tags: ['運営'] } })));
+      stored.set('doc-fresh.json', makeFile('doc-fresh.json', JSON.stringify({ id: 'doc-fresh', title: 'Fresh Doc', markdown: 'MD', tags: ['運営'], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([freshFile, newFile]));
+      mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+      mockDocumentApp.openById.mockImplementation((id) => emptyBodyDoc(id === 'doc-new' ? 'New Doc' : 'Fresh Doc'));
+
+      Code.preCacheAll();
+
+      // The fresh article is neither reconverted, nor re-read from
+      // its snapshot, nor re-put into CacheService.
+      expect(mockDocumentApp.openById).not.toHaveBeenCalledWith('doc-fresh');
+      expect(cacheFolder.getFilesByName).not.toHaveBeenCalledWith('doc-fresh.json');
+      expect(mockCache.put).not.toHaveBeenCalledWith('doc-fresh', expect.any(String), expect.any(Number));
+      // The article converted in this run is warmed as before.
+      expect(mockDocumentApp.openById).toHaveBeenCalledWith('doc-new');
+      expect(mockCache.put).toHaveBeenCalledWith('doc-new', expect.any(String), Code.CACHE_TTL);
+    });
+
     it('preCacheAll drops index entries for articles that left the folder', () => {
       stored.set('index.json', makeFile('index.json', JSON.stringify({ 'gone-id': { sourceModified: MODIFIED, title: 'Gone', tags: [] } })));
       mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
