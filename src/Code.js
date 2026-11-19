@@ -21,7 +21,7 @@ const scriptProperty_ = (name) => String(PropertiesService.getScriptProperties()
 export const CACHE_TTL = 600;
 export const CACHE_SIZE_LIMIT = 100000;
 export const PRE_CACHE_LIMIT = 10;
-export const RSS_CACHE_LIMIT = 50;
+export const RSS_CACHE_LIMIT = 100;
 // Time budget for converting stale article snapshots in one
 // preCacheAll run; articles it cannot reach stay stale and are
 // picked up by the next run, so repeated runs converge.
