@@ -179,23 +179,14 @@ export const preCacheAll = () => {
   // quota, so the TRANSLATE_BACKFILL_LIMIT window (which exists
   // to protect that quota) does not apply to it.
   const spliceTranslations_ = (id, previous, article) => {
-    if (!previous || previous.title !== article.title) return;
-    const indices = spliceableDiffIndices_(previous.markdown, article.markdown);
-    if (!indices) return;
-    for (const lang of ARTICLE_LANGS) {
-      if (langEntryFresh_(lang, id)) continue;
-      const old = readDriveArticleLangCacheRaw_(id, lang);
-      if (!old) continue;
-      const title = (typeof old.title === 'string' && old.title)
-        || (langTitles[lang][id] && langTitles[lang][id].title);
-      if (!title) continue;
-      const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
-      if (markdown == null) continue;
-      writeDriveArticleLangCache_({ id, title, markdown, tags: article.tags }, lang);
-      const entry = { title, sourceModified: modifiedById[id] };
-      langTitles[lang][id] = entry;
+    // The carry-over itself is shared with the request-time
+    // conversion path (see carryTranslationsOver_); this adapter
+    // only mirrors the result into the run's in-memory titles
+    // maps, so the language pass below sees the carried-over
+    // languages as fresh and never calls LanguageApp for them.
+    for (const { lang, title } of carryTranslationsOver_(id, previous, article, modifiedById[id])) {
+      langTitles[lang][id] = { title, sourceModified: modifiedById[id] };
       langTitlesRemoved[lang].delete(id);
-      recordLangTitle_(lang, id, entry);
       console.log(`Translation carried over: ${title} (${lang})`);
     }
   };
@@ -807,7 +798,27 @@ export const translationStatus_ = () => {
  * logged and swallowed — serving the article matters more.
  */
 export const storeConvertedArticle_ = (article, cache) => {
+  // Read the outgoing Japanese snapshot before the write below
+  // replaces it: when this conversion changed only spliceable
+  // lines, the existing translations are carried over and
+  // re-stamped (see carryTranslationsOver_), exactly as
+  // preCacheAll does for its own reconversions. Without this, a
+  // read that lands between a Doc edit and the next preCacheAll
+  // run advances the Japanese snapshot alone — preCacheAll then
+  // sees the article as fresh and never splices — and the
+  // translations stay stale until the backfill retranslates
+  // them. A carry-over failure is logged and swallowed, like
+  // the cache store below: serving the article matters more.
+  const previous = readDriveArticleCacheRaw_(article.id);
   writeDriveArticleCache_(article);
+  if (previous) {
+    try {
+      carryTranslationsOver_(article.id, previous, article,
+        DriveApp.getFileById(article.id).getLastUpdated().getTime());
+    } catch (e) {
+      log_(`Translation carry-over failed (${article.id}): ${e.message}`);
+    }
+  }
   try {
     const payload = JSON.stringify(article);
     if (payload.length < CACHE_SIZE_LIMIT) {
@@ -1307,6 +1318,43 @@ export const applyLineSplice_ = (targetMarkdown, sourceMarkdown, indices) => {
   if (target.length !== source.length) return null;
   indices.forEach((i) => { target[i] = source[i]; });
   return target.join('\n');
+};
+
+// Carry the existing translations of one article over a
+// reconversion: when every line the reconversion changed is
+// spliceable (see spliceableDiffIndices_), each stale language
+// snapshot gets the changed lines from the new Japanese
+// markdown and is re-stamped with `modifiedTime` (the source
+// Doc's current modified time), through the same bookkeeping
+// as a landed translation. A changed article title, or any
+// prose change, carries nothing: the translations stay stale
+// and are retranslated as before. Returns the languages that
+// were carried over, as { lang, title } entries. Shared by
+// preCacheAll's reconversion and by every request-time
+// conversion (storeConvertedArticle_): whichever path replaces
+// the Japanese snapshot first, the translations follow it, so
+// they can never be stranded by the ordering of reads against
+// the periodic run.
+export const carryTranslationsOver_ = (id, previous, article, modifiedTime) => {
+  if (!previous || previous.title !== article.title) return [];
+  const indices = spliceableDiffIndices_(previous.markdown, article.markdown);
+  if (!indices) return [];
+  const carried = [];
+  for (const lang of ARTICLE_LANGS) {
+    const recorded = readLangTitles_(lang)[id];
+    if (recorded && modifiedTime != null && recorded.sourceModified === modifiedTime) continue;
+    const old = readDriveArticleLangCacheRaw_(id, lang);
+    if (!old) continue;
+    const title = (typeof old.title === 'string' && old.title)
+      || (recorded && recorded.title);
+    if (!title) continue;
+    const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
+    if (markdown == null) continue;
+    writeDriveArticleLangCache_({ id, title, markdown, tags: article.tags }, lang);
+    recordLangTitle_(lang, id, { title, sourceModified: modifiedTime });
+    carried.push({ lang, title });
+  }
+  return carried;
 };
 
 // The current Japanese article for the language read path: the
