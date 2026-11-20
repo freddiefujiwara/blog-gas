@@ -4125,6 +4125,144 @@ describe('Music markers', () => {
         expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
         expect(en.sourceModified).toBe(MODIFIED);
       });
+
+      it('a pinned title replaces the carried-over title on the splice path', () => {
+        seedStaleArticle(
+          '本文です\n\nhttps://example.com/old\n\n終わりです\n',
+          '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n',
+          '[zh]本文です\n\nhttps://example.com/old\n\n[zh]終わりです\n',
+        );
+        // The stored English title is the wobbled machine output
+        // the pin exists to fix.
+        stored.set('doc-x.en.json', makeFile('doc-x.en.json', JSON.stringify({ id: 'doc-x', title: 'Packing List', markdown: '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n', tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify({ 'doc-x': { title: 'Packing List', sourceModified: MODIFIED - 1 } })));
+        mockProperties.getProperty.mockImplementation((key) =>
+          key === 'PINNED_TITLES_JSON'
+            ? JSON.stringify({ 'doc-x': { en: '2021-02-16 Everything I Own' } })
+            : (TEST_CONFIG[key] ?? null));
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+
+        Code.preCacheAll();
+
+        expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.title).toBe('2021-02-16 Everything I Own');
+        expect(en.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: '2021-02-16 Everything I Own', sourceModified: MODIFIED } });
+        // The unpinned language carries over exactly as before.
+        const zh = JSON.parse(stored.get('doc-x.zh.json').content);
+        expect(zh.title).toBe('Title ZH');
+        expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED } });
+      });
+    });
+
+    describe('pinned titles (PINNED_TITLES_JSON)', () => {
+      const PIN_ID = 'doc-pin';
+      const PINNED_EN = '2021-02-16 Everything I Own';
+      const setPins = (value) => {
+        mockProperties.getProperty.mockImplementation((key) =>
+          key === 'PINNED_TITLES_JSON' ? value : (TEST_CONFIG[key] ?? null));
+      };
+
+      beforeEach(() => {
+        // Start each test with no pins: this describe sits outside
+        // the Code.js beforeEach that resets getProperty.
+        mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
+      });
+
+      describe('pinnedTitle_', () => {
+        it('returns the pinned title for a mapped id and language', () => {
+          setPins(JSON.stringify({ [PIN_ID]: { en: PINNED_EN, zh: '2021-02-16 随身物品' } }));
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBe(PINNED_EN);
+          expect(Code.pinnedTitle_(PIN_ID, 'zh')).toBe('2021-02-16 随身物品');
+        });
+
+        it('returns null when the property is absent, the id unmapped, or the language unpinned', () => {
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins(JSON.stringify({ 'other-doc': { en: 'Other' } }));
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins(JSON.stringify({ [PIN_ID]: { zh: '2021-02-16 随身物品' } }));
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+        });
+
+        it('ignores malformed or non-object JSON without throwing', () => {
+          setPins('{not json');
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins('"just a string"');
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins('42');
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins('null');
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+        });
+
+        it('ignores pins that are not non-empty strings', () => {
+          setPins(JSON.stringify({ [PIN_ID]: { en: 42 } }));
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+          setPins(JSON.stringify({ [PIN_ID]: { en: '' } }));
+          expect(Code.pinnedTitle_(PIN_ID, 'en')).toBeNull();
+        });
+      });
+
+      describe('recordLangTitle_', () => {
+        it('stores the pinned title instead of the recorded one, keeping the stamp', () => {
+          setPins(JSON.stringify({ [PIN_ID]: { en: PINNED_EN } }));
+          Code.recordLangTitle_('en', PIN_ID, { title: 'Packing List', sourceModified: MODIFIED });
+          expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({
+            [PIN_ID]: { title: PINNED_EN, sourceModified: MODIFIED },
+          });
+        });
+
+        it('a pin for one language does not touch the other language', () => {
+          setPins(JSON.stringify({ [PIN_ID]: { en: PINNED_EN } }));
+          Code.recordLangTitle_('zh', PIN_ID, { title: '机器翻译的标题', sourceModified: MODIFIED });
+          expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({
+            [PIN_ID]: { title: '机器翻译的标题', sourceModified: MODIFIED },
+          });
+        });
+
+        it('records titles exactly as before when no pin applies', () => {
+          Code.recordLangTitle_('en', PIN_ID, { title: 'Belongings List', sourceModified: MODIFIED });
+          expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({
+            [PIN_ID]: { title: 'Belongings List', sourceModified: MODIFIED },
+          });
+        });
+      });
+
+      describe('fresh translation', () => {
+        it('the pinned title overrides the translator output in the snapshot and the stamp, and the title never reaches LanguageApp', () => {
+          mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+          mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+          setPins(JSON.stringify({ 'doc-x': { en: PINNED_EN } }));
+
+          const translated = Code.storeTranslatedArticle_({ id: 'doc-x', title: '2021-02-16 持ち物リスト', markdown: '本文です\n', tags: [] }, 'en');
+
+          expect(translated.title).toBe(PINNED_EN);
+          expect(JSON.parse(stored.get('doc-x.en.json').content).title).toBe(PINNED_EN);
+          expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({
+            'doc-x': { title: PINNED_EN, sourceModified: MODIFIED },
+          });
+          expect(mockLanguageApp.translate.mock.calls.every(([text]) => text !== '2021-02-16 持ち物リスト')).toBe(true);
+        });
+
+        it('an unpinned language of the same article translates exactly as before', () => {
+          mockDriveApp.getFolderById.mockReturnValue(articleFolder([]));
+          mockDriveApp.getFileById.mockReturnValue({ getLastUpdated: () => new Date(MODIFIED) });
+          setPins(JSON.stringify({ 'doc-x': { en: PINNED_EN } }));
+
+          const translated = Code.storeTranslatedArticle_({ id: 'doc-x', title: '2021-02-16 持ち物リスト', markdown: '本文です\n', tags: [] }, 'zh');
+
+          expect(translated.title).toBe('[zh-CN]2021-02-16 持ち物リスト');
+          expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({
+            'doc-x': { title: '[zh-CN]2021-02-16 持ち物リスト', sourceModified: MODIFIED },
+          });
+        });
+      });
     });
 
     // Regression: PR #72 put the translation carry-over only on
