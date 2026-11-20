@@ -4127,6 +4127,155 @@ describe('Music markers', () => {
       });
     });
 
+    // Regression: PR #72 put the translation carry-over only on
+    // preCacheAll's reconversion path, but a request-time
+    // conversion (storeConvertedArticle_) also overwrites the
+    // Japanese snapshot. In production on 2026-11-20 the stuff
+    // list was regenerated at 12:47 and a read landed before the
+    // next preCacheAll run: the Japanese snapshot advanced alone,
+    // preCacheAll then saw the article as fresh, and the
+    // translations stayed stale in both languages (the backfill
+    // was quota-blocked at the time). These tests replay that
+    // sequence: read first, preCacheAll second.
+    describe('read-path reconversion translation carry-over', () => {
+      const docFile = (id, name) => ({ getId: () => id, getName: () => name, getLastUpdated: () => new Date(MODIFIED) });
+      const textEl = (text) => ({
+        getType: () => mockDocumentApp.ElementType.TEXT,
+        asText: () => ({
+          getText: () => text,
+          getTextAttributeIndices: () => [0],
+          getAttributes: () => ({}),
+        }),
+      });
+      const paraEl = (text, heading) => ({
+        getType: () => mockDocumentApp.ElementType.PARAGRAPH,
+        asParagraph: () => ({
+          getHeading: () => heading || mockDocumentApp.ParagraphHeading.NORMAL,
+          getNumChildren: () => 1,
+          getChild: () => textEl(text),
+        }),
+      });
+      const docWithParas = (name, paras) => ({
+        getName: () => name,
+        getBody: () => ({
+          getNumChildren: () => paras.length,
+          getChild: (i) => paras[i],
+        }),
+      });
+      // Same seeding as the preCacheAll splice suite: one article
+      // whose Japanese snapshot and translations are all stale
+      // (stamped MODIFIED - 1); the Doc itself now converts to a
+      // form that differs only in a bare-URL line.
+      const seedStaleArticle = () => {
+        stored.set('doc-x.json', makeFile('doc-x.json', JSON.stringify({ id: 'doc-x', title: '題名', markdown: '本文です\n\nhttps://example.com/old\n\n終わりです\n', tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('doc-x.en.json', makeFile('doc-x.en.json', JSON.stringify({ id: 'doc-x', title: 'Title EN', markdown: '[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n', tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('doc-x.zh.json', makeFile('doc-x.zh.json', JSON.stringify({ id: 'doc-x', title: 'Title ZH', markdown: '[zh]本文です\n\nhttps://example.com/old\n\n[zh]終わりです\n', tags: [], sourceModified: MODIFIED - 1 })));
+        stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED - 1 } })));
+        stored.set('titles-zh.json', makeFile('titles-zh.json', JSON.stringify({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED - 1 } })));
+        mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-x', '題名')]));
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文です'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+      };
+
+      beforeEach(() => {
+        // This suite sits outside describe('Code.js'), whose
+        // beforeEach normally installs the script properties:
+        // install them here so the config (FOLDER_ID above all)
+        // is in place regardless of suite ordering.
+        mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
+        mockDriveApp.getFileById.mockReturnValue(memberFile('題名'));
+        // OG resolution must not turn the bare-URL paragraphs
+        // below into link cards (same guard as the splice suite).
+        mockUrlFetchApp.fetchAll.mockImplementation(() => []);
+        mockUrlFetchApp.fetch.mockImplementation(() => { throw new Error('offline'); });
+      });
+
+      it('a Japanese read that reconverts a spliceable change carries the translations over', () => {
+        seedStaleArticle();
+
+        Code.doGet({ parameter: { id: 'doc-x' } });
+
+        // The Japanese snapshot advanced, as it did in production.
+        const ja = JSON.parse(stored.get('doc-x.json').content);
+        expect(ja.sourceModified).toBe(MODIFIED);
+        expect(ja.markdown).toBe('本文です\n\nhttps://example.com/new\n\n終わりです\n');
+        // And the translations came with it, without LanguageApp.
+        expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.title).toBe('Title EN');
+        expect(en.sourceModified).toBe(MODIFIED);
+        const zh = JSON.parse(stored.get('doc-x.zh.json').content);
+        expect(zh.markdown).toBe('[zh]本文です\n\nhttps://example.com/new\n\n[zh]終わりです\n');
+        expect(zh.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED } });
+        expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED } });
+      });
+
+      it('after a read-path reconversion, a quota-blocked preCacheAll has nothing left to retranslate', () => {
+        seedStaleArticle();
+
+        Code.doGet({ parameter: { id: 'doc-x' } });
+
+        // The production run's backfill could not translate
+        // (LanguageApp quota); the carried-over translations must
+        // already be fresh, so the run leaves them alone.
+        mockLanguageApp.translate.mockImplementation(() => { throw new Error('quota exceeded'); });
+        Code.preCacheAll();
+
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.sourceModified).toBe(MODIFIED);
+        const zh = JSON.parse(stored.get('doc-x.zh.json').content);
+        expect(zh.markdown).toBe('[zh]本文です\n\nhttps://example.com/new\n\n[zh]終わりです\n');
+        expect(zh.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED } });
+        expect(JSON.parse(stored.get('titles-zh.json').content)).toEqual({ 'doc-x': { title: 'Title ZH', sourceModified: MODIFIED } });
+      });
+
+      it('a language read that reconverts carries the translations over even when LanguageApp is down', () => {
+        seedStaleArticle();
+        mockLanguageApp.translate.mockImplementation(() => { throw new Error('quota exceeded'); });
+
+        // This request still falls back to the Japanese article
+        // (the on-demand translation failed, as before), but the
+        // stored translation must have been carried over and
+        // re-stamped, so the freshness rule serves it from the
+        // next read on (that rule is pinned by the language
+        // snapshot suites above; the mock files here cannot be
+        // re-read after an in-place write, so this asserts the
+        // stored state itself).
+        Code.doGet({ parameter: { id: 'doc-x', lang: 'en' } });
+
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
+        expect(en.sourceModified).toBe(MODIFIED);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED } });
+      });
+
+      it('a read-path reconversion with a prose change leaves the translations stale, as before', () => {
+        seedStaleArticle();
+        mockDocumentApp.openById.mockReturnValue(docWithParas('題名', [
+          paraEl('本文が変わりました'),
+          paraEl('https://example.com/new'),
+          paraEl('終わりです'),
+        ]));
+        mockLanguageApp.translate.mockImplementation(() => { throw new Error('quota exceeded'); });
+
+        Code.doGet({ parameter: { id: 'doc-x' } });
+
+        const ja = JSON.parse(stored.get('doc-x.json').content);
+        expect(ja.sourceModified).toBe(MODIFIED);
+        const en = JSON.parse(stored.get('doc-x.en.json').content);
+        expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/old\n\n[en]終わりです\n');
+        expect(en.sourceModified).toBe(MODIFIED - 1);
+        expect(JSON.parse(stored.get('titles-en.json').content)).toEqual({ 'doc-x': { title: 'Title EN', sourceModified: MODIFIED - 1 } });
+      });
+    });
+
     describe('TRANSLATE_BACKFILL_LIMIT', () => {
       const docFile = (id, name) => ({ getId: () => id, getName: () => name, getLastUpdated: () => new Date(MODIFIED) });
       // Two already-fresh articles, newest first in list order,
