@@ -937,13 +937,38 @@ export const writeLangTitles_ = (lang, entries) => {
   }
 };
 
+// A title fixed by hand for one article and language, from the
+// PINNED_TITLES_JSON script property:
+// { [docId]: { en: '...', zh: '...' } }. Machine translation of
+// a short title is not stable across runs — the belongings list
+// came back as both "Packing List" and "Belongings List" — and
+// every full retranslation would roll the dice again, so a
+// pinned title wins over whatever the translator returns at
+// every place a language title is written (the snapshot's title
+// and the titles-map stamp alike). Absent or malformed JSON
+// simply means no pins. Japanese titles are never pinned: the
+// helper is only consulted for the en/zh writes.
+export const PINNED_TITLES_PROPERTY = 'PINNED_TITLES_JSON';
+
+export const pinnedTitle_ = (id, lang) => {
+  try {
+    const pins = JSON.parse(scriptProperty_(PINNED_TITLES_PROPERTY) || '{}');
+    const title = pins && pins[id] ? pins[id][lang] : null;
+    return typeof title === 'string' && title ? title : null;
+  } catch (e) {
+    return null;
+  }
+};
+
 // Record one translated title in its language's map, reading the
 // map fresh and writing it straight back. A completed translation
 // is durable the moment it exists, and entries recorded by
 // another writer since the caller's own copy was read survive.
+// A pinned title replaces the recorded one (the stamp is kept).
 export const recordLangTitle_ = (lang, id, entry) => {
+  const pinned = pinnedTitle_(id, lang);
   const entries = readLangTitles_(lang);
-  entries[id] = entry;
+  entries[id] = pinned ? { ...entry, title: pinned } : entry;
   writeLangTitles_(lang, entries);
 };
 
@@ -1198,7 +1223,9 @@ export const translateArticle_ = (article, lang, deadline) => {
   const target = LANG_TARGETS[lang];
   return {
     id: article.id,
-    title: translateText_(article.title, target, deadline),
+    // A pinned title is used verbatim and never reaches
+    // LanguageApp at all.
+    title: pinnedTitle_(article.id, lang) || translateText_(article.title, target, deadline),
     markdown: translateMarkdown_(article.markdown, target, deadline),
     tags: article.tags,
   };
@@ -1345,7 +1372,8 @@ export const carryTranslationsOver_ = (id, previous, article, modifiedTime) => {
     if (recorded && modifiedTime != null && recorded.sourceModified === modifiedTime) continue;
     const old = readDriveArticleLangCacheRaw_(id, lang);
     if (!old) continue;
-    const title = (typeof old.title === 'string' && old.title)
+    const title = pinnedTitle_(id, lang)
+      || (typeof old.title === 'string' && old.title)
       || (recorded && recorded.title);
     if (!title) continue;
     const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
