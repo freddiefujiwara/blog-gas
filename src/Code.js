@@ -179,24 +179,14 @@ export const preCacheAll = () => {
   // quota, so the TRANSLATE_BACKFILL_LIMIT window (which exists
   // to protect that quota) does not apply to it.
   const spliceTranslations_ = (id, previous, article) => {
-    if (!previous || previous.title !== article.title) return;
-    const indices = spliceableDiffIndices_(previous.markdown, article.markdown);
-    if (!indices) return;
-    for (const lang of ARTICLE_LANGS) {
-      if (langEntryFresh_(lang, id)) continue;
-      const old = readDriveArticleLangCacheRaw_(id, lang);
-      if (!old) continue;
-      const title = pinnedTitle_(id, lang)
-        || (typeof old.title === 'string' && old.title)
-        || (langTitles[lang][id] && langTitles[lang][id].title);
-      if (!title) continue;
-      const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
-      if (markdown == null) continue;
-      writeDriveArticleLangCache_({ id, title, markdown, tags: article.tags }, lang);
-      const entry = { title, sourceModified: modifiedById[id] };
-      langTitles[lang][id] = entry;
+    // The carry-over itself is shared with the request-time
+    // conversion path (see carryTranslationsOver_); this adapter
+    // only mirrors the result into the run's in-memory titles
+    // maps, so the language pass below sees the carried-over
+    // languages as fresh and never calls LanguageApp for them.
+    for (const { lang, title } of carryTranslationsOver_(id, previous, article, modifiedById[id])) {
+      langTitles[lang][id] = { title, sourceModified: modifiedById[id] };
       langTitlesRemoved[lang].delete(id);
-      recordLangTitle_(lang, id, entry);
       console.log(`Translation carried over: ${title} (${lang})`);
     }
   };
@@ -808,7 +798,27 @@ export const translationStatus_ = () => {
  * logged and swallowed — serving the article matters more.
  */
 export const storeConvertedArticle_ = (article, cache) => {
+  // Read the outgoing Japanese snapshot before the write below
+  // replaces it: when this conversion changed only spliceable
+  // lines, the existing translations are carried over and
+  // re-stamped (see carryTranslationsOver_), exactly as
+  // preCacheAll does for its own reconversions. Without this, a
+  // read that lands between a Doc edit and the next preCacheAll
+  // run advances the Japanese snapshot alone — preCacheAll then
+  // sees the article as fresh and never splices — and the
+  // translations stay stale until the backfill retranslates
+  // them. A carry-over failure is logged and swallowed, like
+  // the cache store below: serving the article matters more.
+  const previous = readDriveArticleCacheRaw_(article.id);
   writeDriveArticleCache_(article);
+  if (previous) {
+    try {
+      carryTranslationsOver_(article.id, previous, article,
+        DriveApp.getFileById(article.id).getLastUpdated().getTime());
+    } catch (e) {
+      log_(`Translation carry-over failed (${article.id}): ${e.message}`);
+    }
+  }
   try {
     const payload = JSON.stringify(article);
     if (payload.length < CACHE_SIZE_LIMIT) {
@@ -1009,6 +1019,10 @@ export const translateText_ = (text, target, deadline) => {
 export const splitLongText_ = (text, limit) => {
   const parts = [];
   let rest = String(text);
+  // A limit below 1 can never advance the cut (the window is
+  // empty, so the slice stays empty and the loop never ends):
+  // it means "no split", the outcome a NaN limit already gave.
+  if (!(limit >= 1)) return rest ? [rest] : [];
   while (rest.length > limit) {
     const window = rest.slice(0, limit);
     let cut = Math.max(
@@ -1331,6 +1345,44 @@ export const applyLineSplice_ = (targetMarkdown, sourceMarkdown, indices) => {
   if (target.length !== source.length) return null;
   indices.forEach((i) => { target[i] = source[i]; });
   return target.join('\n');
+};
+
+// Carry the existing translations of one article over a
+// reconversion: when every line the reconversion changed is
+// spliceable (see spliceableDiffIndices_), each stale language
+// snapshot gets the changed lines from the new Japanese
+// markdown and is re-stamped with `modifiedTime` (the source
+// Doc's current modified time), through the same bookkeeping
+// as a landed translation. A changed article title, or any
+// prose change, carries nothing: the translations stay stale
+// and are retranslated as before. Returns the languages that
+// were carried over, as { lang, title } entries. Shared by
+// preCacheAll's reconversion and by every request-time
+// conversion (storeConvertedArticle_): whichever path replaces
+// the Japanese snapshot first, the translations follow it, so
+// they can never be stranded by the ordering of reads against
+// the periodic run.
+export const carryTranslationsOver_ = (id, previous, article, modifiedTime) => {
+  if (!previous || previous.title !== article.title) return [];
+  const indices = spliceableDiffIndices_(previous.markdown, article.markdown);
+  if (!indices) return [];
+  const carried = [];
+  for (const lang of ARTICLE_LANGS) {
+    const recorded = readLangTitles_(lang)[id];
+    if (recorded && modifiedTime != null && recorded.sourceModified === modifiedTime) continue;
+    const old = readDriveArticleLangCacheRaw_(id, lang);
+    if (!old) continue;
+    const title = pinnedTitle_(id, lang)
+      || (typeof old.title === 'string' && old.title)
+      || (recorded && recorded.title);
+    if (!title) continue;
+    const markdown = applyLineSplice_(old.markdown, article.markdown, indices);
+    if (markdown == null) continue;
+    writeDriveArticleLangCache_({ id, title, markdown, tags: article.tags }, lang);
+    recordLangTitle_(lang, id, { title, sourceModified: modifiedTime });
+    carried.push({ lang, title });
+  }
+  return carried;
 };
 
 // The current Japanese article for the language read path: the
@@ -1943,7 +1995,13 @@ export const decodeHtmlEntities_ = (s) => String(s || '').replace(/&(#x?[0-9a-fA
     const code = (body[1] === 'x' || body[1] === 'X')
       ? parseInt(body.slice(2), 16)
       : parseInt(body.slice(1), 10);
-    return Number.isNaN(code) ? whole : String.fromCodePoint(code);
+    if (Number.isNaN(code)) return whole;
+    // References HTML forbids — NUL, surrogates and anything past
+    // U+10FFFF — decode to U+FFFD, as browsers do. fromCodePoint
+    // throws a RangeError for the last group, which used to take
+    // down the whole OG parse of any page carrying one.
+    if (code === 0 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF)) return '\uFFFD';
+    return String.fromCodePoint(code);
   }
   const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
   return Object.prototype.hasOwnProperty.call(named, body) ? named[body] : whole;
@@ -2241,11 +2299,20 @@ export const fetchOgDataFromApi_ = (urls) => {
  *  from the next conversion after ze fetched it; the blog's daily
  *  cycle makes that delay harmless.
  *  ----------------------------- */
+// One OG field as text. OG payloads arrive as JSON from other
+// services (the OGP API, ze's published cache, the ROOM collects
+// data), so a field can be any JSON value: strings pass, scalars
+// stringify (the treatment descriptions always had), and anything
+// else reads as empty — including a JSON object whose `toString`
+// is not callable, which String() throws on.
+const ogText_ = (value) => (typeof value === 'string' ? value
+  : (typeof value === 'number' || typeof value === 'boolean') && value ? String(value) : '');
+
 export const zeOgEntryToData_ = (entry) => {
   if (!entry || entry.status !== 'ok') return null;
-  const title = entry.title || '';
-  const image = entry.image || '';
-  const description = String(entry.description || '').slice(0, OG_DESCRIPTION_LIMIT);
+  const title = ogText_(entry.title);
+  const image = ogText_(entry.image);
+  const description = ogText_(entry.description).slice(0, OG_DESCRIPTION_LIMIT);
   if (!title && !image) return null;
   return { title, image, description };
 };
@@ -2370,9 +2437,9 @@ export const roomPostId_ = (url) => {
 export const roomOgFromCollect_ = (collect) => {
   if (!collect) return null;
   const item = collect.item || {};
-  const title = collect.name || item.name || '';
-  const image = (item.picture && item.picture.url) || (collect.image_top && collect.image_top.url) || '';
-  const description = String(collect.content || '').slice(0, OG_DESCRIPTION_LIMIT);
+  const title = ogText_(collect.name) || ogText_(item.name);
+  const image = ogText_(item.picture && item.picture.url) || ogText_(collect.image_top && collect.image_top.url);
+  const description = ogText_(collect.content).slice(0, OG_DESCRIPTION_LIMIT);
   if (!title && !image) return null;
   return { title, image, description };
 };
@@ -2668,13 +2735,22 @@ const RSS_DAY_NAMES_ = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 // in for it. Returns null for titles without a valid leading date,
 // in which case the item is emitted without a <pubDate>.
 export const pubDateFromTitle_ = (title) => {
-  const m = String(title || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  // A non-string title (a deformed stored RSS item) has no
+  // leading date; String() would throw on a JSON object whose
+  // `toString` is not callable.
+  const m = (typeof title === 'string' ? title : '').match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return null;
   const year = Number(m[1]);
   const month = Number(m[2]);
   const day = Number(m[3]);
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-  const weekday = RSS_DAY_NAMES_[new Date(Date.UTC(year, month - 1, day)).getUTCDay()];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  // Date.UTC rolls an impossible date over to the next month
+  // (Feb 30 becomes Mar 2), which would print a pubDate that
+  // does not exist, stamped with the rolled-over date's weekday.
+  // Only a date that survives the round trip is a real one.
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  const weekday = RSS_DAY_NAMES_[date.getUTCDay()];
   return `${weekday}, ${m[3]} ${RSS_MONTH_NAMES_[month - 1]} ${m[1]} 00:00:00 +0900`;
 };
 
@@ -2721,7 +2797,14 @@ ${itemsXml}  </channel>
   return ContentService.createTextOutput(rss).setMimeType(ContentService.MimeType.XML);
 };
 
-const escapeXml_ = (s) => (s || '').replace(/&/g, '&amp;')
+// XML escaping. The values are strings in practice, but they can
+// arrive from stored JSON or another service's payload with the
+// wrong type; a deformed value must not throw here — scalars
+// render as their text, anything else (including a JSON object
+// whose `toString` is not callable) as empty.
+const escapeXml_ = (s) => (typeof s === 'string' ? s
+  : (typeof s === 'number' || typeof s === 'boolean') && s ? String(s) : '')
+  .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
   .replace(/"/g, '&quot;')
