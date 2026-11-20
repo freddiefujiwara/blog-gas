@@ -642,6 +642,131 @@ describe('Code.js', () => {
     });
   });
 
+  describe('listIdsAndTitles_ index-backed reads (Fix A)', () => {
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+    };
+    const folderScan = vi.fn();
+    const scanFiles = [
+      { getId: () => 'id-old', getName: () => '2026-01-01 A', getLastUpdated: () => new Date(1000) },
+      { getId: () => 'id-new', getName: () => '2026-01-03 C', getLastUpdated: () => new Date(3000) },
+      { getId: () => 'id-mid', getName: () => '2026-01-02 B', getLastUpdated: () => new Date(2000) },
+    ];
+    const INDEX = {
+      'id-old': { sourceModified: 1000, title: '2026-01-01 A', tags: [] },
+      'id-new': { sourceModified: 3000, title: '2026-01-03 C', tags: ['技術'] },
+      'id-mid': { sourceModified: 2000, title: '2026-01-02 B', tags: [] },
+    };
+    const SORTED_IDS = ['id-new', 'id-mid', 'id-old'];
+    const SORTED_TITLES = { 'id-new': '2026-01-03 C', 'id-mid': '2026-01-02 B', 'id-old': '2026-01-01 A' };
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      folderScan.mockReset();
+      let i = 0;
+      folderScan.mockImplementation(() => ({ hasNext: () => i < scanFiles.length, next: () => scanFiles[i++] }));
+      // Earlier suites leave one-shot implementations on the
+      // shared cache mock (clearAllMocks keeps them); reset put
+      // so a leftover throw cannot eat the re-warm calls.
+      mockCache.put.mockReset();
+      mockCache.get.mockReturnValue(null);
+      mockDriveApp.getFolderById.mockReturnValue({
+        getFilesByType: folderScan,
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      });
+    });
+
+    it('serves ids and titles from the snapshot index on a cache miss, without scanning the folder', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      const { ids, titles, listCached } = Code.listIdsAndTitles_(mockCache);
+      expect(ids).toEqual(SORTED_IDS);
+      expect(titles).toEqual(SORTED_TITLES);
+      expect(listCached).toBe(false);
+      expect(folderScan).not.toHaveBeenCalled();
+    });
+
+    it('re-warms the list and titles cache entries from the index', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      Code.listIdsAndTitles_(mockCache);
+      expect(mockCache.put).toHaveBeenCalledWith('0', JSON.stringify(SORTED_IDS), Code.CACHE_TTL);
+      expect(mockCache.put).toHaveBeenCalledWith('titles', JSON.stringify(SORTED_TITLES), Code.CACHE_TTL);
+    });
+
+    it('falls back to the folder scan when the index file is missing', () => {
+      const { ids, titles } = Code.listIdsAndTitles_(mockCache);
+      expect(folderScan).toHaveBeenCalled();
+      expect(ids).toEqual(SORTED_IDS);
+      expect(titles).toEqual(SORTED_TITLES);
+    });
+
+    it('falls back to the folder scan when the index file is corrupt', () => {
+      stored.set('index.json', makeFile('index.json', '{not json'));
+      const { ids } = Code.listIdsAndTitles_(mockCache);
+      expect(folderScan).toHaveBeenCalled();
+      expect(ids).toEqual(SORTED_IDS);
+    });
+
+    it('falls back to the folder scan when an index entry has no usable title', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify({ 'id-new': { sourceModified: 3000, tags: [] } })));
+      const { ids } = Code.listIdsAndTitles_(mockCache);
+      expect(folderScan).toHaveBeenCalled();
+      expect(ids).toEqual(SORTED_IDS);
+    });
+
+    it('listFromSnapshotIndex_ returns null for an empty index', () => {
+      stored.set('index.json', makeFile('index.json', '{}'));
+      expect(Code.listFromSnapshotIndex_()).toBeNull();
+    });
+
+    it('produces the same ids and titles as the scan path for the same articles', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      const viaIndex = Code.listIdsAndTitles_(mockCache);
+      stored.clear();
+      const viaScan = Code.listIdsAndTitles_(mockCache);
+      expect(viaIndex.ids).toEqual(viaScan.ids);
+      expect(viaIndex.titles).toEqual(viaScan.titles);
+    });
+
+    it('serves o=titles from the index on a cache miss, tags included, without scanning the folder', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ 'id-new': ['技術'], 'id-mid': [], 'id-old': [] })));
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+      Code.doGet({ parameter: { o: 'titles' } });
+      expect(folderScan).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: SORTED_IDS,
+        titles: SORTED_TITLES,
+        tags: { 'id-new': ['技術'], 'id-mid': [], 'id-old': [] },
+      }));
+    });
+
+    it('serves o=titles&lang=en from the index plus titles-en.json on a cache miss', () => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      stored.set('titles-en.json', makeFile('titles-en.json', JSON.stringify({ 'id-new': { title: 'C in English', sourceModified: 3000 } })));
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ 'id-new': [], 'id-mid': [], 'id-old': [] })));
+      const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+      Code.doGet({ parameter: { o: 'titles', lang: 'en' } });
+      expect(folderScan).not.toHaveBeenCalled();
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: SORTED_IDS,
+        titles: { 'id-new': 'C in English', 'id-mid': '2026-01-02 B', 'id-old': '2026-01-01 A' },
+        tags: { 'id-new': [], 'id-mid': [], 'id-old': [] },
+      }));
+    });
+  });
+
   describe('Folder Helpers', () => {
     describe('getDocInfoInFolder_', () => {
       it('should return {exists: false} if the file is not in the folder', () => {

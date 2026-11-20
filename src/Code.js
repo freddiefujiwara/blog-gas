@@ -1689,19 +1689,61 @@ export const getTagsMap_ = (ids, cache, options) => {
 };
 
 /**
+ * The id list and titles map rebuilt from the snapshot index
+ * alone — the same { id, title } pairs the folder scan returns,
+ * in the same order (title descending, the list's "newest
+ * first"). The index is the persistent record preCacheAll keeps
+ * of every live article, so serving from it costs one small
+ * file read instead of a folder scan. Returns null when the
+ * index cannot be trusted as a whole — missing, unreadable,
+ * empty, or holding an entry without a usable title — so the
+ * caller falls back to the scan for that request. An article
+ * the index does not know yet (published since the last
+ * preCacheAll run) is simply absent until the next run, the
+ * same staleness the CacheService entries themselves carry.
+ */
+export const listFromSnapshotIndex_ = () => {
+  const index = readSnapshotIndex_();
+  const docs = [];
+  for (const id of Object.keys(index)) {
+    const entry = index[id];
+    if (!entry || typeof entry.title !== 'string' || !entry.title) return null;
+    docs.push({ id, title: entry.title });
+  }
+  if (!docs.length) return null;
+  docs.sort((a, b) => b.title.localeCompare(a.title, 'ja'));
+  return { ids: docs.map((d) => d.id), titles: titlesById_(docs) };
+};
+
+/**
  * The article id list and titles map for the list/titles
  * responses: the preCacheAll-warmed cache entries when both are
- * present, otherwise a live folder listing. Titles travel with
- * the id list so clients can offer title search over every
- * article, not just the pre-cached few. `listCached` reports
- * whether the id list itself was cached (the list handler logs
- * on a miss).
+ * present; on a cache miss, the snapshot index preCacheAll
+ * maintains in Drive (which also re-warms the cache, like
+ * getTagsMap_ does for tags); and only when the index is
+ * unusable, a live folder listing. Titles travel with the id
+ * list so clients can offer title search over every article,
+ * not just the pre-cached few. `listCached` reports whether
+ * the id list itself was cached (the list handler logs on a
+ * miss).
  */
 export const listIdsAndTitles_ = (cache) => {
   const cachedList = cache.get('0');
   const cachedTitles = cache.get('titles');
   if (cachedList && cachedTitles) {
     return { ids: JSON.parse(cachedList), titles: JSON.parse(cachedTitles), listCached: true };
+  }
+  const fromIndex = listFromSnapshotIndex_();
+  if (fromIndex) {
+    try {
+      const listPayload = JSON.stringify(fromIndex.ids);
+      const titlesPayload = JSON.stringify(fromIndex.titles);
+      if (listPayload.length < CACHE_SIZE_LIMIT && titlesPayload.length < CACHE_SIZE_LIMIT) {
+        cache.put('0', listPayload, CACHE_TTL);
+        cache.put('titles', titlesPayload, CACHE_TTL);
+      }
+    } catch (e) { /* serving the list matters more than re-warming */ }
+    return { ...fromIndex, listCached: Boolean(cachedList) };
   }
   const docs = listDocsSortedByTitle_(getConfig_().folderId);
   return { ids: docs.map((d) => d.id), titles: titlesById_(docs), listCached: Boolean(cachedList) };
