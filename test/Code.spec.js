@@ -1383,6 +1383,48 @@ describe('Code.js', () => {
 
         expect(Code.paragraphTextWithInlineStyles_(mockP)).toBe('');
       });
+
+      const plainPara = (text, attrs = {}) => ({
+        getNumChildren: () => 1,
+        getChild: () => ({
+          getType: () => mockDocumentApp.ElementType.TEXT,
+          asText: () => ({
+            getText: () => text,
+            getTextAttributeIndices: () => [0],
+            getAttributes: () => attrs,
+          }),
+        }),
+      });
+
+      it('should turn backtick pairs into code spans', () => {
+        expect(Code.paragraphTextWithInlineStyles_(plainPara('run `npm test` first'))).toBe('run `npm test` first');
+      });
+
+      it('should keep backslashes inside a code span literal', () => {
+        expect(Code.paragraphTextWithInlineStyles_(plainPara('path `C:\\tmp\\x` end'))).toBe('path `C:\\tmp\\x` end');
+      });
+
+      it('should escape an unmatched backtick as before', () => {
+        expect(Code.paragraphTextWithInlineStyles_(plainPara('a ` stray'))).toBe('a \\` stray');
+      });
+
+      it('should not put bold markup inside a code span', () => {
+        const result = Code.paragraphTextWithInlineStyles_(
+          plainPara('pre `code` post', { [mockDocumentApp.Attribute.BOLD]: true })
+        );
+        expect(result).toBe('**pre **`code`** post**');
+      });
+
+      it('splitCodeSpans_ splits prose and code segments', () => {
+        expect(Code.splitCodeSpans_('a `b` c `d`')).toEqual([
+          { code: false, text: 'a ' },
+          { code: true, text: 'b' },
+          { code: false, text: ' c ' },
+          { code: true, text: 'd' },
+        ]);
+        expect(Code.splitCodeSpans_('no ticks')).toEqual([{ code: false, text: 'no ticks' }]);
+        expect(Code.splitCodeSpans_('')).toEqual([]);
+      });
     });
   });
   describe('saveLog_', () => {
@@ -2325,6 +2367,43 @@ describe('Code.js', () => {
         expect(markdown).toContain('class="link-card"');
         expect(markdown).not.toContain('is-grayout');
         expect(markdown).not.toContain('画像グレーアウト');
+      });
+
+      it('converts ``` fence paragraphs into a fenced code block with raw lines', () => {
+        const doc = docWithChildren([
+          linkPara([textChild('before')]),
+          linkPara([textChild('```js')]),
+          linkPara([textChild('const x = `not a span`;')]),
+          linkPara([textChild('[[タグ：技術]]')]),
+          linkPara([textChild('')]),
+          linkPara([textChild('```')]),
+          linkPara([textChild('after')]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('```js\nconst x = `not a span`;\n[[タグ：技術]]\n\n```');
+        expect(markdown).toContain('before');
+        expect(markdown).toContain('after');
+      });
+
+      it('does not turn a bare URL inside a code block into a link card', () => {
+        cachedOg();
+        const doc = docWithChildren([
+          linkPara([textChild('```')]),
+          linkPara([textChild(URL_A)]),
+          linkPara([textChild('```')]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('```\n' + URL_A + '\n```');
+        expect(markdown).not.toContain('link-card');
+      });
+
+      it('closes an unterminated code block at the end of the document', () => {
+        const doc = docWithChildren([
+          linkPara([textChild('```')]),
+          linkPara([textChild('code line')]),
+        ]);
+        const markdown = Code.docBodyToMarkdown_(doc);
+        expect(markdown).toContain('```\ncode line\n```');
       });
 
       const imagePara = () => ({

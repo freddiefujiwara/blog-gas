@@ -2596,16 +2596,56 @@ export const docBodyToMarkdown_ = (doc) => {
   // extracted via extractDocTags_ and never reach the markdown.
   // Music marker paragraphs become player placeholders instead, and
   // grayout markers flag the card or image that follows them.
-  const out = children.map((el, idx) => {
-    if (isTagMarkerElement_(el)) return '';
-    if (isGrayoutMarkerElement_(el)) return '';
+  // A paragraph that is only ``` (optionally with a language tag)
+  // opens a fenced code block; the paragraphs up to the closing
+  // ``` paragraph become raw code lines — no inline conversion,
+  // no marker interpretation and no link cards inside the block.
+  // An unterminated block is closed at the end of the document.
+  const out = [];
+  let codeLines = null;
+  let codeFence = '';
+  const closeCodeBlock = () => {
+    out.push(`${codeFence}\n${codeLines.join('\n')}\n\`\`\`\n`);
+    codeLines = null;
+  };
+  children.forEach((el, idx) => {
+    const type = el.getType();
+    if (codeLines) {
+      if (type === DocumentApp.ElementType.PARAGRAPH) {
+        const raw = paragraphPlainText_(el.asParagraph());
+        if (raw !== null && raw.trim() === '```') {
+          closeCodeBlock();
+          return;
+        }
+        codeLines.push(raw === null ? '' : raw.replace(/\r/g, ''));
+        return;
+      }
+      if (type === DocumentApp.ElementType.LIST_ITEM) {
+        const raw = paragraphPlainText_(el.asListItem());
+        codeLines.push(raw === null ? '' : raw.replace(/\r/g, ''));
+        return;
+      }
+      codeLines.push('');
+      return;
+    }
+    if (type === DocumentApp.ElementType.PARAGRAPH) {
+      const raw = paragraphPlainText_(el.asParagraph());
+      if (raw !== null && /^```[^\s`]*$/.test(raw.trim())) {
+        codeLines = [];
+        codeFence = raw.trim();
+        return;
+      }
+    }
+    if (isTagMarkerElement_(el)) { out.push(''); return; }
+    if (isGrayoutMarkerElement_(el)) { out.push(''); return; }
     const music = musicMarkerFromElement_(el);
-    if (music) return `${musicTrackMarkdown_(music)}\n`;
+    if (music) { out.push(`${musicTrackMarkdown_(music)}\n`); return; }
     // The card case is keyed by URL in the pre-scan above; an image
     // paragraph right after the marker is flagged positionally here.
     const grayoutImage = idx > 0 && isGrayoutMarkerElement_(children[idx - 1]);
-    return elementToMarkdown_(el, { grayoutImage });
+    out.push(elementToMarkdown_(el, { grayoutImage }));
   });
+  if (codeLines) closeCodeBlock();
   ogDataByUrl_ = {};
   grayoutCardUrls_ = {};
   return `${out.join('\n').replace(/\n{3,}/g, '\n\n').trim()}\n`;
@@ -2741,8 +2781,6 @@ export const paragraphTextWithInlineStyles_ = (p, grayoutImage = false) => {
 
       const chunk = fullText.substring(start, end);
       if (!chunk) continue;
-      const text = escapeMdInline_(chunk.replace(/\r/g, ''));
-      if (!text) continue;
 
       const attrs = textEl.getAttributes(start);
       const link = attrs[LINK_URL];
@@ -2750,11 +2788,23 @@ export const paragraphTextWithInlineStyles_ = (p, grayoutImage = false) => {
       const italic = !!attrs[ITALIC];
 
       const key = link ? 'link' : bold && italic ? 'bi' : bold ? 'b' : italic ? 'i' : '';
-      if (key !== openKey || (key === 'link' && link !== openLink)) {
-        closeInline();
-        if (key) openInline(key, link);
+      // Backtick pairs inside the chunk become code spans. A code
+      // span never carries bold/italic/link markup, so any open
+      // style closes before it and reopens for the prose after it.
+      for (const seg of splitCodeSpans_(chunk.replace(/\r/g, ''))) {
+        if (seg.code) {
+          closeInline();
+          out.push(`\`${seg.text}\``);
+          continue;
+        }
+        const text = escapeMdInline_(seg.text);
+        if (!text) continue;
+        if (key !== openKey || (key === 'link' && link !== openLink)) {
+          closeInline();
+          if (key) openInline(key, link);
+        }
+        out.push(text);
       }
-      out.push(text);
     }
   }
   closeInline();
@@ -2762,6 +2812,24 @@ export const paragraphTextWithInlineStyles_ = (p, grayoutImage = false) => {
 };
 
 export const escapeMdInline_ = (s) => s.replace(/\\/g, '\\\\').replace(/`/g, '\\`');
+
+// Split a text chunk into prose and inline-code segments at
+// backtick pairs. An unmatched backtick stays in a prose segment
+// (and is escaped there), so a stray backtick keeps rendering
+// literally, as it did before code spans were supported.
+export const splitCodeSpans_ = (s) => {
+  const parts = [];
+  const re = /`([^`]+)`/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) parts.push({ code: false, text: s.slice(last, m.index) });
+    parts.push({ code: true, text: m[1] });
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) parts.push({ code: false, text: s.slice(last) });
+  return parts;
+};
 
 export const escapeMdTable_ = (s) => s.replace(/\|/g, '\\|');
 
