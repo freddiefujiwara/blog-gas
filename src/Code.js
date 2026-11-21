@@ -1049,25 +1049,9 @@ export const splitLongText_ = (text, limit) => {
  *   - raw HTML: link-card blocks, music-track divs, grayout
  *     <img> lines, and any inline tag
  *   - [[...]] markers ([[目次]] and friends), full-width included
- *   - lyrics: the blocks following a [[歌詞]] marker, delimited
- *     by the same rule the front end boxes them with
- *     (isLyricBlock_) — quoted creative content, never translated
  *   - table separator rows and the structural prefixes of
  *     headings, list items and blockquotes
  *  ----------------------------- */
-const LYRICS_MARKERS_ = new Set(['[[歌詞]]', '［［歌詞］］']);
-
-// Mirrors the front end's lyric-line test (wrapLyricsBlocks in
-// the blog's markdown service): a block under a [[歌詞]] marker
-// is a lyric line while it satisfies all of these.
-export const isLyricBlock_ = (block) => Boolean(block)
-  && block.length <= 40
-  && !block.startsWith('#')
-  && !block.startsWith('<')
-  && !block.startsWith('[[')
-  && !block.includes('](')
-  && !block.endsWith('。');
-
 const INLINE_PROTECTED_RE_ = /(`+[^`]*`+)|(!?)\[([^\]]*)\]\(([^)]*)\)|(https?:\/\/\S+)|\[\[[^\]]*\]\]|［［[^］]*］］|(<[^>]*>)/g;
 const LINE_PREFIX_RE_ = /^(#{1,6}\s+|\s*(?:[-*+]|\d+\.)\s+|\s*>\s?)/;
 const TABLE_SEPARATOR_RE_ = /^\|?[\s:|-]+\|$/;
@@ -1106,7 +1090,6 @@ export const splitMarkdownSegments_ = (markdown) => {
   const parts = String(markdown || '').split(/(\n{2,})/);
   const segments = [];
   let fenceOpen = false;
-  let inLyrics = false;
   parts.forEach((part) => {
     if (!part) return;
     if (/^\n{2,}$/.test(part)) {
@@ -1125,18 +1108,6 @@ export const splitMarkdownSegments_ = (markdown) => {
     });
     if (fenced) {
       segments.push({ text: part, prose: false });
-      return;
-    }
-    if (inLyrics) {
-      if (isLyricBlock_(trimmed)) {
-        segments.push({ text: part, prose: false });
-        return;
-      }
-      inLyrics = false;
-    }
-    if (LYRICS_MARKERS_.has(trimmed)) {
-      segments.push({ text: part, prose: false });
-      inLyrics = true;
       return;
     }
     if (trimmed.startsWith('<')

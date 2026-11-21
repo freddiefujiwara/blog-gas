@@ -188,7 +188,6 @@ describe('Property-based tests', () => {
         FENCE_BLOCK,
         '[[目次]]',
         '[[歌詞]]',
-        'ユニークな歌詞ライン',
       ].join('\n\n');
       destroyers.forEach((destroy) => {
         mockLanguageApp.translate.mockImplementation((text, from, target) => destroy(text));
@@ -196,7 +195,10 @@ describe('Property-based tests', () => {
         expect(out).toContain(PROTECTED_URL);
         expect(out).toContain(FENCE_BLOCK);
         expect(out).toContain('[[目次]]');
-        expect(out).toContain('ユニークな歌詞ライン');
+        // A stray [[歌詞]] line is protected as a generic marker;
+        // the lyrics feature itself is gone, so nothing after it
+        // is shielded (lyrics now live in code fences).
+        expect(out).toContain('[[歌詞]]');
         expect(out).not.toContain('ユニークな本文トークン');
       });
     });
@@ -532,22 +534,6 @@ describe('Property-based tests', () => {
       fc.assert(
         fc.property(grapheme({ maxLength: 40 }), grapheme({ maxLength: 40 }), (rel, page) => {
           expect(typeof Code.resolveUrl_(rel, page)).toBe('string');
-        }),
-        RUNS,
-      );
-    });
-
-    it('isLyricBlock_ rejects every block with a disqualifying shape', () => {
-      fc.assert(
-        fc.property(grapheme({ maxLength: 80 }), (block) => {
-          const disqualified = block.length > 40
-            || block.startsWith('#')
-            || block.startsWith('<')
-            || block.startsWith('[[')
-            || block.includes('](')
-            || block.endsWith('。');
-          if (disqualified) expect(Code.isLyricBlock_(block)).toBe(false);
-          else expect(typeof Code.isLyricBlock_(block)).toBe('boolean');
         }),
         RUNS,
       );

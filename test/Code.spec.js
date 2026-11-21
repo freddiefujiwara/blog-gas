@@ -3730,12 +3730,6 @@ describe('Music markers', () => {
           '',
           '[[目次]]',
           '',
-          '[[歌詞]]',
-          '',
-          'そらを とんで ゆく',
-          '',
-          'まちの あかりが 見える',
-          '',
           '## 次の章',
           '',
           '終わりの文章です。',
@@ -3753,11 +3747,6 @@ describe('Music markers', () => {
         expect(out).toContain('`const x = 1;`');
         expect(out).toContain('const y = "日本語";');
         expect(out).toContain('[[目次]]');
-        expect(out).toContain('[[歌詞]]');
-        // Lyrics are quoted content: never translated.
-        expect(out).toContain('そらを とんで ゆく');
-        expect(out).toContain('まちの あかりが 見える');
-        expect(out).not.toContain('[en]そらを');
         // Prose (including link text, alt text and headings) went
         // through the translator.
         expect(out).toContain('[en]見出しです');
@@ -4167,12 +4156,6 @@ describe('Music markers', () => {
         const before = '```\nconst a = 1;\n```\n';
         const after = '```\nconst a = 2;\n```\n';
         expect(Code.spliceableDiffIndices_(before, after)).toEqual([1]);
-      });
-
-      it('accepts a lyrics line change (lyrics are never translated)', () => {
-        const before = '[[歌詞]]\n\n歌詞の一行目\n\n本文です\n';
-        const after = '[[歌詞]]\n\n歌詞の二行目\n\n本文です\n';
-        expect(Code.spliceableDiffIndices_(before, after)).toEqual([2]);
       });
 
       it('accepts a heading change and a bold title line change', () => {
