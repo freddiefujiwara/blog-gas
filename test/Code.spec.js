@@ -479,6 +479,11 @@ describe('Code.js', () => {
         if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
         return TEST_CONFIG[key] ?? null;
       });
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['id1', 'id2']);
+        if (key === 'titles') return JSON.stringify({ id1: 'Title & More', id2: 'Other Article' });
+        return null;
+      });
 
       const mockTextOutput = {
         setMimeType: vi.fn().mockReturnThis(),
@@ -505,6 +510,11 @@ describe('Code.js', () => {
         if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
         return TEST_CONFIG[key] ?? null;
       });
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['id1', 'id2']);
+        if (key === 'titles') return JSON.stringify({ id1: '2026-11-04 Dated Article', id2: 'Undated Article' });
+        return null;
+      });
 
       const mockTextOutput = {
         setMimeType: vi.fn().mockReturnThis(),
@@ -517,6 +527,56 @@ describe('Code.js', () => {
       expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('<pubDate>Wed, 04 Nov 2026 00:00:00 +0900</pubDate>'));
       const xml = mockContentService.createTextOutput.mock.calls[0][0];
       expect((xml.match(/<pubDate>/g) || []).length).toBe(1);
+    });
+
+    it('should exclude RSS items that are not in the current article list', () => {
+      const chunkData = [
+        { id: 'id1', title: 'Listed Article', url: 'http://url1', content: 'Body' },
+        { id: 'idX', title: 'Unlisted Article', url: 'http://urlX', content: 'Body' },
+      ];
+      mockProperties.getProperty.mockImplementation((key) => {
+        if (key === 'RSS_DATA') return JSON.stringify(['RSS_DATA001']);
+        if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
+        return TEST_CONFIG[key] ?? null;
+      });
+      mockCache.get.mockImplementation((key) => {
+        if (key === '0') return JSON.stringify(['id1', 'id2']);
+        if (key === 'titles') return JSON.stringify({ id1: 'Listed Article', id2: 'Other Article' });
+        return null;
+      });
+
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'rss' } });
+
+      const xml = mockContentService.createTextOutput.mock.calls[0][0];
+      expect(xml).toContain('<title>Listed Article</title>');
+      expect(xml).not.toContain('Unlisted Article');
+    });
+
+    it('should serve the stored RSS items when the article list cannot be loaded', () => {
+      const chunkData = [{ id: 'id1', title: 'Stored Article', url: 'http://url', content: 'Body' }];
+      mockProperties.getProperty.mockImplementation((key) => {
+        if (key === 'RSS_DATA') return JSON.stringify(['RSS_DATA001']);
+        if (key === 'RSS_DATA001') return JSON.stringify(chunkData);
+        return TEST_CONFIG[key] ?? null;
+      });
+      // The list lookup itself blows up (cache read throws): the
+      // feed falls back to the stored items instead of failing.
+      mockCache.get.mockImplementation(() => { throw new Error('cache unavailable'); });
+
+      const mockTextOutput = {
+        setMimeType: vi.fn().mockReturnThis(),
+      };
+      mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+
+      Code.doGet({ parameter: { o: 'rss' } });
+
+      const xml = mockContentService.createTextOutput.mock.calls[0][0];
+      expect(xml).toContain('<title>Stored Article</title>');
     });
 
     it('should handle article fetch errors and continue', () => {

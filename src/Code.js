@@ -2817,6 +2817,25 @@ const generateRSSResponse_ = () => {
     }
   }
 
+  // The stored items are a snapshot taken by the last
+  // dailyRSSCache run, while the article list is maintained
+  // separately (cache / snapshot index / folder scan). The two
+  // can drift apart: an article that left the list — moved out
+  // of the folder, or never picked up on a project where the
+  // periodic jobs do not run — would stay in the feed, pointing
+  // at a page the blog itself does not serve. Serve only items
+  // the current list still carries, so the feed and the blog
+  // never disagree about which articles exist. A failed list
+  // lookup serves the stored items as-is: a possibly stale
+  // feed beats no feed at all.
+  try {
+    const { ids } = listIdsAndTitles_(CacheService.getScriptCache());
+    const liveIds = new Set(ids);
+    items = items.filter((item) => item && liveIds.has(item.id));
+  } catch (e) {
+    log_(`RSS list filter failed: ${e.message}`);
+  }
+
   const itemsXml = items.length ? items.map((item) => {
     const pubDate = pubDateFromTitle_(item.title);
     return `    <item>
