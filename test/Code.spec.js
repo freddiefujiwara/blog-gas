@@ -2960,7 +2960,8 @@ describe('Code.js', () => {
 
     it('pruneOrphanSnapshots_ keeps the snapshot index file', () => {
       const indexFile = { getName: () => 'index.json', setTrashed: vi.fn() };
-      const files = [indexFile];
+      const statusFile = { getName: () => Code.TRANSLATION_STATUS_FILE_NAME, setTrashed: vi.fn() };
+      const files = [indexFile, statusFile];
       let i = 0;
       const folder = { getFiles: () => ({ hasNext: () => i < files.length, next: () => files[i++] }) };
       mockDriveApp.getFolderById.mockReturnValue({
@@ -2970,6 +2971,7 @@ describe('Code.js', () => {
       Code.pruneOrphanSnapshots_([]);
 
       expect(indexFile.setTrashed).not.toHaveBeenCalled();
+      expect(statusFile.setTrashed).not.toHaveBeenCalled();
     });
 
     it('preCacheAll creates snapshots for articles outside the hot set too', () => {
@@ -2983,11 +2985,13 @@ describe('Code.js', () => {
 
       Code.preCacheAll();
 
-      // One stored file per article, plus the snapshot index and
-      // the OGP dispatch record.
-      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 4);
+      // One stored file per article, plus the snapshot index,
+      // the OGP dispatch record and the translation-status
+      // snapshot the run refreshes at the end.
+      expect(stored.size).toBe(Code.PRE_CACHE_LIMIT + 5);
       expect(stored.has('index.json')).toBe(true);
       expect(stored.has(Code.OGP_DISPATCH_FILE_NAME)).toBe(true);
+      expect(stored.has(Code.TRANSLATION_STATUS_FILE_NAME)).toBe(true);
       const docPuts = mockCache.put.mock.calls.filter((c) => String(c[0]).startsWith('id'));
       expect(docPuts).toHaveLength(Code.PRE_CACHE_LIMIT);
     });
@@ -4798,6 +4802,11 @@ describe('Translation status endpoint', () => {
       let i = 0;
       return { hasNext: () => i < copies.length, next: () => copies[i++] };
     }),
+    getFiles: vi.fn(() => {
+      const all = [...stored.values()].flat();
+      let i = 0;
+      return { hasNext: () => i < all.length, next: () => all[i++] };
+    }),
     createFile: vi.fn((name, content) => putFile(name, content)),
   };
   const docFile = (id, title) => ({
@@ -4951,5 +4960,56 @@ describe('Translation status endpoint', () => {
     const status = callStatus();
 
     expect(status.articles[0].en).toBe('fresh');
+  });
+
+  it('serves the persisted snapshot on later calls instead of recomputing', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED);
+    putSnapshot('id-a', 'zh', MODIFIED);
+
+    const first = callStatus();
+    expect(first.articles[0]).toEqual({ id: 'id-a', title: '2026-01-01 A', en: 'fresh', zh: 'fresh' });
+    // The first call persisted its result as the served snapshot.
+    expect(stored.has('translation-status.json')).toBe(true);
+
+    // The underlying snapshots change (en goes stale); a served
+    // snapshot must not notice until it is refreshed.
+    putSnapshot('id-a', 'en', MODIFIED - 9);
+    const second = callStatus();
+    expect(second.generatedAt).toBe(first.generatedAt);
+    expect(second.articles[0].en).toBe('fresh');
+  });
+
+  it('refreshes a persisted snapshot older than the refresh threshold, and leaves a fresh one alone', () => {
+    docFiles = [docFile('id-a', '2026-01-01 A')];
+    putSnapshot('id-a', null, MODIFIED);
+    putSnapshot('id-a', 'en', MODIFIED - 9);
+    const staleGeneratedAt = new Date(Date.now() - Code.TRANSLATION_STATUS_REFRESH_MS - 60000).toISOString();
+    putFile('translation-status.json', {
+      generatedAt: staleGeneratedAt,
+      total: 1,
+      languages: { en: { fresh: 1, stale: 0, missing: 0 }, zh: { fresh: 1, stale: 0, missing: 0 } },
+      articles: [{ id: 'id-a', title: '2026-01-01 A', en: 'fresh', zh: 'fresh' }],
+    });
+
+    Code.refreshTranslationStatusSnapshot_();
+
+    // Recomputed from the snapshots: en is stale now, zh missing.
+    const refreshed = JSON.parse(stored.get('translation-status.json').at(-1).content);
+    expect(refreshed.generatedAt).not.toBe(staleGeneratedAt);
+    expect(refreshed.articles[0].en).toBe('stale');
+    expect(refreshed.articles[0].zh).toBe('missing');
+
+    // A snapshot inside the threshold is left untouched. (The
+    // refreshed content is re-stored as a fresh file first: this
+    // mock's getBlob cannot see setContent updates, while in
+    // production the refreshed snapshot is what reads return.)
+    stored.set('translation-status.json', []);
+    putFile('translation-status.json', refreshed);
+    Code.refreshTranslationStatusSnapshot_();
+    expect(stored.get('translation-status.json')).toHaveLength(1);
+    const untouched = JSON.parse(stored.get('translation-status.json')[0].content);
+    expect(untouched.generatedAt).toBe(refreshed.generatedAt);
   });
 });

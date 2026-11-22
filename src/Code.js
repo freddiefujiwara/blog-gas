@@ -368,6 +368,15 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`OGP dispatch check failed: ${e.message}`);
   }
+
+  // Keep the translation-status snapshot warm so the status
+  // endpoint serves in seconds instead of recomputing per
+  // request. Best-effort like the dispatch above.
+  try {
+    refreshTranslationStatusSnapshot_();
+  } catch (e) {
+    console.error(`Translation status refresh failed: ${e.message}`);
+  }
 };
 
 /**
@@ -715,16 +724,32 @@ export const writeSnapshotIndex_ = (index) => {
  *  separate record and have diverged from the snapshots before
  *  (a titles list claiming an article translated while the
  *  article itself served Japanese).
+ *
+ *  A full computation reads every snapshot in the cache folder,
+ *  which takes minutes — far too slow to run per request (the
+ *  /social dashboard calls this endpoint directly and waited
+ *  ~3 minutes). The endpoint therefore serves a persisted
+ *  snapshot of the result (translation-status.json in the cache
+ *  folder, next to the snapshot index): preCacheAll refreshes
+ *  it whenever it is older than TRANSLATION_STATUS_REFRESH_MS,
+ *  and the endpoint itself recomputes only when the snapshot
+ *  is missing or older than TRANSLATION_STATUS_SERVE_MS, so
+ *  the served generatedAt can never drift without bound even
+ *  if the trigger stops running.
  *  ----------------------------- */
 
-// The sourceModified stamps of every copy of a snapshot file
-// (duplicate files under one name do occur; see
-// writeSnapshotIndex_). Copies that cannot be read or parsed
-// contribute nothing.
-export const snapshotStamps_ = (fileName) => {
-  const stamps = [];
+// The sourceModified stamps of every snapshot file in the
+// cache folder, collected in ONE pass over the folder and keyed
+// by file name (duplicate files under one name do occur; see
+// writeSnapshotIndex_ — every copy contributes its stamp).
+// Files that cannot be read or parsed contribute nothing. The
+// previous shape — one getFilesByName search per article and
+// language — cost a Drive search per snapshot and took minutes
+// over the whole folder; a single iteration is far cheaper.
+export const collectSnapshotStamps_ = () => {
+  const stampsByName = new Map();
   try {
-    const files = getArticleCacheFolder_().getFilesByName(fileName);
+    const files = getArticleCacheFolder_().getFiles();
     const seen = new Set();
     while (files.hasNext()) {
       const file = files.next();
@@ -735,13 +760,17 @@ export const snapshotStamps_ = (fileName) => {
       seen.add(key);
       try {
         const data = JSON.parse(file.getBlob().getDataAsString('UTF-8'));
-        if (data && typeof data.sourceModified === 'number') stamps.push(data.sourceModified);
-      } catch (e) { /* an unreadable copy proves nothing */ }
+        if (data && typeof data.sourceModified === 'number') {
+          const name = file.getName();
+          if (!stampsByName.has(name)) stampsByName.set(name, []);
+          stampsByName.get(name).push(data.sourceModified);
+        }
+      } catch (e) { /* an unreadable file proves nothing */ }
     }
   } catch (e) {
-    log_(`Snapshot stamp read failed (${fileName}): ${e.message}`);
+    log_(`Snapshot stamp collection failed: ${e.message}`);
   }
-  return stamps;
+  return stampsByName;
 };
 
 // The stamp of the current Japanese snapshot of one article:
@@ -749,8 +778,8 @@ export const snapshotStamps_ = (fileName) => {
 // (the index is written together with every snapshot write),
 // otherwise the newest stamp on record. Null when the article
 // has no Japanese snapshot at all.
-export const canonicalJapaneseStamp_ = (docId, index) => {
-  const stamps = snapshotStamps_(`${docId}.json`);
+export const canonicalJapaneseStamp_ = (docId, index, stampsByName) => {
+  const stamps = stampsByName.get(`${docId}.json`) || [];
   if (!stamps.length) return null;
   const indexed = index && index[docId] ? index[docId].sourceModified : null;
   if (indexed != null && stamps.includes(indexed)) return indexed;
@@ -761,8 +790,8 @@ export const canonicalJapaneseStamp_ = (docId, index) => {
 // Japanese snapshot exists, 'stale' when a language snapshot
 // exists but was made from an older Japanese snapshot, and
 // 'missing' when there is none.
-export const langSnapshotStatus_ = (docId, lang, japaneseStamp) => {
-  const stamps = snapshotStamps_(langSnapshotFileName_(docId, lang));
+export const langSnapshotStatus_ = (docId, lang, japaneseStamp, stampsByName) => {
+  const stamps = stampsByName.get(langSnapshotFileName_(docId, lang)) || [];
   if (!stamps.length) return 'missing';
   return japaneseStamp != null && stamps.includes(japaneseStamp) ? 'fresh' : 'stale';
 };
@@ -770,13 +799,14 @@ export const langSnapshotStatus_ = (docId, lang, japaneseStamp) => {
 export const translationStatus_ = () => {
   const docs = listDocsSortedByTitle_(getConfig_().folderId);
   const index = readSnapshotIndex_();
+  const stampsByName = collectSnapshotStamps_();
   const languages = {};
   ARTICLE_LANGS.forEach((lang) => { languages[lang] = { fresh: 0, stale: 0, missing: 0 }; });
   const articles = docs.map((d) => {
-    const japaneseStamp = canonicalJapaneseStamp_(d.id, index);
+    const japaneseStamp = canonicalJapaneseStamp_(d.id, index, stampsByName);
     const entry = { id: d.id, title: d.title };
     for (const lang of ARTICLE_LANGS) {
-      const status = langSnapshotStatus_(d.id, lang, japaneseStamp);
+      const status = langSnapshotStatus_(d.id, lang, japaneseStamp, stampsByName);
       entry[lang] = status;
       languages[lang][status] += 1;
     }
@@ -788,6 +818,61 @@ export const translationStatus_ = () => {
     languages,
     articles,
   };
+};
+
+export const TRANSLATION_STATUS_FILE_NAME = 'translation-status.json';
+// The endpoint recomputes synchronously once the persisted
+// snapshot is older than this, bounding its staleness even
+// when no trigger refreshes it.
+export const TRANSLATION_STATUS_SERVE_MS = 6 * 60 * 60 * 1000;
+// preCacheAll refreshes the persisted snapshot once it is
+// older than this, so in practice generatedAt stays within
+// roughly one trigger interval of this age.
+export const TRANSLATION_STATUS_REFRESH_MS = 15 * 60 * 1000;
+
+// The persisted status snapshot, or null when it is missing,
+// unreadable, or not shaped like one.
+export const readTranslationStatusSnapshot_ = () => {
+  const data = readJsonFile_(TRANSLATION_STATUS_FILE_NAME, null, 'Translation status');
+  if (!data || !Array.isArray(data.articles)) return null;
+  if (Number.isNaN(Date.parse(data.generatedAt))) return null;
+  return data;
+};
+
+const translationStatusAgeMs_ = (snapshot) => Date.now() - Date.parse(snapshot.generatedAt);
+
+// Computes the status and persists it as the served snapshot.
+// The persist is best-effort: a write failure is logged and the
+// computed status is still returned.
+export const computeAndStoreTranslationStatus_ = () => {
+  const status = translationStatus_();
+  try {
+    writeJsonFile_(TRANSLATION_STATUS_FILE_NAME, JSON.stringify(status));
+  } catch (e) {
+    log_(`Translation status write failed: ${e.message}`);
+  }
+  return status;
+};
+
+// What the endpoint serves: the persisted snapshot while it is
+// inside the serve window, a fresh computation otherwise.
+export const translationStatusResponse_ = () => {
+  const snapshot = readTranslationStatusSnapshot_();
+  if (snapshot && translationStatusAgeMs_(snapshot) <= TRANSLATION_STATUS_SERVE_MS) return snapshot;
+  return computeAndStoreTranslationStatus_();
+};
+
+// Keeps the persisted snapshot warm; called from preCacheAll.
+// Fully guarded — a failure here must never fail the run.
+export const refreshTranslationStatusSnapshot_ = () => {
+  try {
+    const snapshot = readTranslationStatusSnapshot_();
+    if (!snapshot || translationStatusAgeMs_(snapshot) > TRANSLATION_STATUS_REFRESH_MS) {
+      computeAndStoreTranslationStatus_();
+    }
+  } catch (e) {
+    log_(`Translation status refresh failed: ${e.message}`);
+  }
 };
 
 /**
@@ -833,9 +918,10 @@ export const storeConvertedArticle_ = (article, cache) => {
  * Remove snapshot files whose source Doc is no longer in the
  * article folder (deleted or moved away), so the cache folder
  * only ever holds live articles. tags.json, the snapshot index,
- * the OGP dispatch record and the translated-title maps live in
- * the same folder but are not article snapshots and are always
- * kept; translated snapshots belong to their article.
+ * the OGP dispatch record, the translated-title maps and the
+ * translation-status snapshot live in the same folder but are
+ * not article snapshots and are always kept; translated
+ * snapshots belong to their article.
  */
 export const pruneOrphanSnapshots_ = (liveIds) => {
   try {
@@ -845,6 +931,7 @@ export const pruneOrphanSnapshots_ = (liveIds) => {
     const keep = new Set([
       TAGS_FILE_NAME, SNAPSHOT_INDEX_FILE_NAME, OGP_DISPATCH_FILE_NAME,
       TITLES_LANG_FILE_NAMES.en, TITLES_LANG_FILE_NAMES.zh,
+      TRANSLATION_STATUS_FILE_NAME,
     ]);
     const files = folder.getFiles();
     while (files.hasNext()) {
@@ -1727,7 +1814,7 @@ export const listIdsAndTitles_ = (cache) => {
 export const doGet = (e) => {
   const { id: docId, o: output, lang: langParam } = (e && e.parameter) || {};
   if (output === 'rss') return generateRSSResponse_();
-  if (output === 'translation-status') return json_(translationStatus_());
+  if (output === 'translation-status') return json_(translationStatusResponse_());
   // Only the exact values en/zh select a translation; no lang,
   // lang=ja and anything else keep the Japanese behaviour below,
   // byte for byte.
