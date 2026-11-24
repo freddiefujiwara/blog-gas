@@ -26,6 +26,42 @@ jobs:
       - name: Run tests
         run: npm test
 
+  oracle:
+    if: ${{ github.ref != 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Cache Lean toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan/toolchains
+            lean_spec/.lake
+          key: lean-v4.22.0-${{ hashFiles('lean_spec/lean-toolchain', 'lean_spec/lakefile.lean', 'lean_spec/BlogGasSpec.lean', 'lean_spec/BlogGasSpec/**', 'lean_spec/Main.lean') }}
+
+      - name: Install elan (Lean 4.22.0)
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain leanprover/lean4:v4.22.0
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Verify proofs and build the oracle
+        working-directory: lean_spec
+        run: |
+          lake build
+          lake build bloggas_oracle
+
+      - name: Install deps
+        run: npm install
+
+      - name: Differential test against the Lean oracle
+        run: npm run test:oracle
+
   deploy-prod:
     needs: test
     if: ${{ github.ref == 'refs/heads/main' }}
@@ -74,7 +110,7 @@ jobs:
           fi
 
   deploy-staging:
-    needs: test
+    needs: [test, oracle]
     if: ${{ github.ref != 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
