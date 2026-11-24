@@ -3443,6 +3443,75 @@ describe('Code.js', () => {
       });
     });
 
+    describe('doGet article read-through warming', () => {
+      const MODIFIED = 1700000000000;
+      let filesByName;
+      let getFilesByName;
+
+      beforeEach(() => {
+        const mockTextOutput = { setMimeType: vi.fn().mockReturnThis() };
+        mockContentService.createTextOutput.mockReturnValue(mockTextOutput);
+        filesByName = new Map();
+        getFilesByName = vi.fn((name) => {
+          const file = filesByName.get(name);
+          return { hasNext: () => Boolean(file), next: () => file };
+        });
+        mockDriveApp.getFolderById.mockReturnValue({
+          getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => ({ getFilesByName }) })),
+          getFilesByType: vi.fn(() => ({ hasNext: () => false })),
+        });
+        const mockParentsIterator = {
+          hasNext: vi.fn().mockReturnValueOnce(true).mockReturnValue(false),
+          next: vi.fn().mockReturnValue({ getId: () => TEST_FOLDER_ID }),
+        };
+        mockDriveApp.getFileById.mockReturnValue({
+          getMimeType: () => mockMimeType.GOOGLE_DOCS,
+          getParents: () => mockParentsIterator,
+          getName: () => 'Doc W',
+          getLastUpdated: () => new Date(MODIFIED),
+        });
+      });
+
+      const snapshotFile = (payload) => ({
+        getBlob: () => ({ getDataAsString: () => JSON.stringify(payload) }),
+      });
+      const parseResponse = () => JSON.parse(mockContentService.createTextOutput.mock.calls[0][0]);
+
+      it('warms CacheService when a Japanese article is served from its Drive snapshot', () => {
+        mockCache.get.mockReturnValue(null);
+        const article = { id: 'doc-w', title: 'Doc W', markdown: 'MD', tags: ['運営'] };
+        filesByName.set('doc-w.json', snapshotFile({ ...article, sourceModified: MODIFIED }));
+
+        Code.doGet({ parameter: { id: 'doc-w' } });
+
+        expect(parseResponse()).toEqual(article);
+        expect(mockCache.put).toHaveBeenCalledWith('doc-w', JSON.stringify(article), Code.CACHE_TTL);
+        expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      });
+
+      it('warms the language cache key when a translated article is served from its Drive snapshot', () => {
+        mockCache.get.mockReturnValue(null);
+        const article = { id: 'doc-w', title: 'Doc W (EN)', markdown: 'MD EN', tags: ['運営'] };
+        filesByName.set('doc-w.en.json', snapshotFile({ ...article, sourceModified: MODIFIED }));
+
+        Code.doGet({ parameter: { id: 'doc-w', lang: 'en' } });
+
+        expect(parseResponse()).toEqual(article);
+        expect(mockCache.put).toHaveBeenCalledWith('doc-w:en', JSON.stringify(article), Code.CACHE_TTL);
+        expect(mockDocumentApp.openById).not.toHaveBeenCalled();
+      });
+
+      it('serves a translated article from the warmed language entry without reading Drive', () => {
+        const article = { id: 'doc-w', title: 'Doc W (EN)', markdown: 'MD EN', tags: ['運営'] };
+        mockCache.get.mockImplementation((key) => (key === 'doc-w:en' ? JSON.stringify(article) : null));
+
+        Code.doGet({ parameter: { id: 'doc-w', lang: 'en' } });
+
+        expect(parseResponse()).toEqual(article);
+        expect(getFilesByName).not.toHaveBeenCalled();
+      });
+    });
+
     describe('preCacheAll tags map', () => {
       it('saves a complete tags map including docs outside the conversion window', () => {
         const total = Code.PRE_CACHE_LIMIT + 2;
