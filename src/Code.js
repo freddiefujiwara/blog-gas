@@ -566,6 +566,24 @@ const readSnapshotFile_ = (fileName, docId) => {
 
 export const readDriveArticleCache_ = (docId) => readSnapshotFile_(`${docId}.json`, docId);
 
+// Read-through warming: an article served from its Drive
+// snapshot is also stored in CacheService, so repeat views
+// within CACHE_TTL take the hot layer instead of re-reading
+// the snapshot file (and re-checking the Doc's modified time)
+// on every request. The freshness rules are unchanged: an
+// entry is written only after the snapshot passed its
+// freshness check, and it lives no longer than the entry a
+// conversion would have written. Oversized articles stay
+// Drive-only, exactly as at conversion time.
+const warmArticleCache_ = (cache, key, article) => {
+  try {
+    const payload = JSON.stringify(article);
+    if (payload.length < CACHE_SIZE_LIMIT) {
+      (cache || CacheService.getScriptCache()).put(key, payload, CACHE_TTL);
+    }
+  } catch (e) { /* serving the article matters more than warming */ }
+};
+
 /** -----------------------------
  *  Translated article snapshots: beside every Japanese snapshot
  *  (<id>.json) the article-cache folder can hold one snapshot per
@@ -1459,7 +1477,10 @@ const getJapaneseArticle_ = (docId, info, cache) => {
     } catch (e) { /* convert below */ }
   }
   const driveCached = readDriveArticleCache_(docId);
-  if (driveCached) return driveCached;
+  if (driveCached) {
+    warmArticleCache_(cache, docId, driveCached);
+    return driveCached;
+  }
   const doc = DocumentApp.openById(docId);
   const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
   storeConvertedArticle_(article, cache);
@@ -1474,14 +1495,31 @@ const getJapaneseArticle_ = (docId, info, cache) => {
  * than failing the read.
  */
 export const getArticleForLang_ = (docId, info, lang, cache) => {
+  // Language payloads live under their own cache key: the
+  // Japanese entries are keyed by document id alone and must
+  // never serve a language request (see doGet).
+  const langKey = `${docId}:${lang}`;
+  const cachedLang = cache.get(langKey);
+  if (cachedLang) {
+    try {
+      const parsed = JSON.parse(cachedLang);
+      if (parsed && Array.isArray(parsed.tags)) {
+        log_(`Document (ID:${docId}) retrieved from cache (${lang})`);
+        return parsed;
+      }
+    } catch (e) { /* regenerate below */ }
+  }
   const langCached = readDriveArticleLangCache_(docId, lang);
   if (langCached) {
     log_(`Document (ID:${docId}) retrieved from Drive cache (${lang})`);
+    warmArticleCache_(cache, langKey, langCached);
     return langCached;
   }
   const article = getJapaneseArticle_(docId, info, cache);
   try {
-    return storeTranslatedArticle_(article, lang);
+    const translated = storeTranslatedArticle_(article, lang);
+    warmArticleCache_(cache, langKey, translated);
+    return translated;
   } catch (e) {
     log_(`Document (ID:${docId}) translation failed (${lang}): ${e.message}`);
     return article;
@@ -1969,6 +2007,7 @@ export const doGet = (e) => {
   const driveCached = readDriveArticleCache_(docId);
   if (driveCached) {
     log_(`Document (ID:${docId}) retrieved from Drive cache`);
+    warmArticleCache_(cache, docId, driveCached);
     return json_(driveCached);
   }
 
