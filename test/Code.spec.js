@@ -5013,3 +5013,125 @@ describe('Translation status endpoint', () => {
     expect(untouched.generatedAt).toBe(refreshed.generatedAt);
   });
 });
+
+describe('List payload persistence', () => {
+  const MODIFIED = 1700000000000;
+  // File name -> every copy under that name (duplicates included).
+  const stored = new Map();
+  let copySeq = 0;
+  const makeFile = (name, content) => {
+    const fid = `file-${++copySeq}`;
+    return {
+      name,
+      content,
+      getId: () => fid,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+      setTrashed: vi.fn(),
+    };
+  };
+  const putFile = (name, data) => {
+    const content = typeof data === 'string' ? data : JSON.stringify(data);
+    const f = makeFile(name, content);
+    stored.set(name, [...(stored.get(name) || []), f]);
+    return f;
+  };
+  const cacheFolder = {
+    getFilesByName: vi.fn((name) => {
+      const copies = stored.get(name) || [];
+      let i = 0;
+      return { hasNext: () => i < copies.length, next: () => copies[i++] };
+    }),
+    getFiles: vi.fn(() => {
+      const all = [...stored.values()].flat();
+      let i = 0;
+      return { hasNext: () => i < all.length, next: () => all[i++] };
+    }),
+    createFile: vi.fn((name, content) => putFile(name, content)),
+  };
+  const ARTICLE = { id: 'id-a', title: '2026-01-01 A', markdown: 'MD', tags: ['技術'] };
+  const INDEX = { 'id-a': { sourceModified: MODIFIED, title: '2026-01-01 A', tags: ['技術'] } };
+  const PAYLOAD = {
+    ids: ['id-a'],
+    titles: { 'id-a': '2026-01-01 A' },
+    article_cache: [ARTICLE],
+    tags: { 'id-a': ['技術'] },
+  };
+  const callList = () => {
+    Code.doGet({ parameter: {} });
+    const call = mockContentService.createTextOutput.mock.calls.at(-1);
+    return JSON.parse(call[0]);
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    stored.clear();
+    copySeq = 0;
+    mockProperties.getProperty.mockImplementation((key) => TEST_CONFIG[key] ?? null);
+    mockContentService.createTextOutput.mockReturnValue({ setMimeType: vi.fn().mockReturnThis() });
+    mockDriveApp.getFolderById.mockImplementation(() => ({
+      getFilesByType: vi.fn(() => ({ hasNext: () => false })),
+      getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+    }));
+    mockDriveApp.getFileById.mockImplementation(() => ({
+      getLastUpdated: () => new Date(MODIFIED),
+    }));
+    mockCache.get.mockReturnValue(null);
+    mockCache.getAll.mockReturnValue({});
+  });
+
+  it('stores a payload and reads it back while the index is unchanged', () => {
+    putFile('index.json', INDEX);
+
+    Code.storeListPayload_(PAYLOAD);
+
+    expect(stored.has('list-payload.json')).toBe(true);
+    expect(Code.readValidListPayload_()).toEqual(PAYLOAD);
+  });
+
+  it('rejects the stored payload once the index state moves on', () => {
+    putFile('index.json', INDEX);
+    Code.storeListPayload_(PAYLOAD);
+    expect(Code.readValidListPayload_()).toEqual(PAYLOAD);
+
+    // The article was reconverted: its index entry carries a new
+    // sourceModified, so the stored payload no longer matches.
+    stored.set('index.json', []);
+    putFile('index.json', {
+      'id-a': { sourceModified: MODIFIED + 1, title: '2026-01-01 A', tags: ['技術'] },
+    });
+    expect(Code.readValidListPayload_()).toBeNull();
+  });
+
+  it('rejects a missing or misshapen stored payload', () => {
+    putFile('index.json', INDEX);
+    expect(Code.readValidListPayload_()).toBeNull();
+
+    putFile('list-payload.json', { stamp: 'x', payload: { ids: 'not-an-array' } });
+    expect(Code.readValidListPayload_()).toBeNull();
+  });
+
+  it('serves the persisted payload from doGet without assembling', () => {
+    putFile('index.json', INDEX);
+    putFile('list-payload.json', { stamp: Code.listPayloadStamp_(INDEX), payload: PAYLOAD });
+
+    // No snapshot exists, so assembly could never produce the
+    // article body below; equality proves the persisted path.
+    expect(callList()).toEqual(PAYLOAD);
+  });
+
+  it('assembles on a miss, stores the payload, then serves the stored copy', () => {
+    putFile('index.json', INDEX);
+    putFile('id-a.json', { ...ARTICLE, sourceModified: MODIFIED });
+
+    expect(callList()).toEqual(PAYLOAD);
+    expect(stored.has('list-payload.json')).toBe(true);
+
+    // The snapshot disappears: assembly would now return an
+    // empty article_cache, but the stored payload still serves.
+    stored.set('id-a.json', []);
+    expect(callList()).toEqual(PAYLOAD);
+  });
+
+});

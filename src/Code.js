@@ -377,6 +377,7 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`Translation status refresh failed: ${e.message}`);
   }
+
 };
 
 /**
@@ -1807,6 +1808,100 @@ export const listIdsAndTitles_ = (cache) => {
   return { ids: docs.map((d) => d.id), titles: titlesById_(docs), listCached: Boolean(cachedList) };
 };
 
+/** -----------------------------
+ *  List payload: the assembled list response (ids, titles, the
+ *  newest articles' bodies, tags) persisted as one file
+ *  (list-payload.json in the article-cache folder).
+ *
+ *  Assembling the response per request reads the newest
+ *  articles' snapshots from Drive one by one whenever the
+ *  CacheService copies have expired, which took 15-20 seconds
+ *  in production. The persisted copy is served instead while
+ *  the snapshot index still matches the state it was built
+ *  from: the stamp below is the index's (id, sourceModified,
+ *  title) triples in id order, and every input of the response
+ *  (the id order, the titles, the tags, the snapshot bodies)
+ *  is a function of exactly that state, so a matching stamp
+ *  means the copy is what assembly would produce now. Any
+ *  article change — a conversion upserts its index entry, a
+ *  publication adds one, preCacheAll prunes removed ones —
+ *  changes the stamp, and the next request reassembles (and
+ *  re-stores) the payload: the same freshness the index itself
+ *  already carries for ids and titles. Only that one request
+ *  pays the assembly; preCacheAll is deliberately not involved,
+ *  so its index-trusting hot path stays untouched.
+ *  ----------------------------- */
+
+export const LIST_PAYLOAD_FILE_NAME = 'list-payload.json';
+
+// The stamp of the snapshot index state a list payload was
+// built from: every entry's id, sourceModified and title, in
+// id order. Deterministic for identical index content.
+export const listPayloadStamp_ = (index) => JSON.stringify(
+  Object.keys(index).sort().map((id) => {
+    const entry = index[id] || {};
+    return [id, entry.sourceModified ?? null, entry.title ?? null];
+  })
+);
+
+// The persisted list payload, or null when it is missing,
+// misshapen, or built from a different snapshot index state
+// than the current one.
+export const readValidListPayload_ = () => {
+  const data = readJsonFile_(LIST_PAYLOAD_FILE_NAME, null, 'List payload');
+  if (!data || typeof data.stamp !== 'string' || !data.payload) return null;
+  const payload = data.payload;
+  if (!Array.isArray(payload.ids) || !payload.titles
+    || !Array.isArray(payload.article_cache) || !payload.tags) return null;
+  const index = readSnapshotIndex_();
+  if (!Object.keys(index).length) return null;
+  return listPayloadStamp_(index) === data.stamp ? payload : null;
+};
+
+// Persists an assembled list payload with the stamp of the
+// snapshot index as it stands now. Best-effort: a failure is
+// logged and the payload is still served by the caller.
+export const storeListPayload_ = (payload) => {
+  try {
+    const stamp = listPayloadStamp_(readSnapshotIndex_());
+    writeJsonFile_(LIST_PAYLOAD_FILE_NAME, JSON.stringify({ stamp, payload }));
+  } catch (e) {
+    log_(`List payload write failed: ${e.message}`);
+  }
+};
+
+// The list response assembled from the live stores, exactly as
+// the list endpoint has always built it.
+export const assembleListPayload_ = (cache, config) => {
+  const { ids: allIds, titles, listCached } = listIdsAndTitles_(cache);
+  if (!listCached) log_('List not in cache. Getting from Drive');
+
+  const tags = getTagsMap_(allIds, cache, { scanDocs: true });
+
+  const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
+  const cachedArticles = cache.getAll(targetIds);
+  const articleCache = targetIds.map((id) => {
+    if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
+    const driveCached = readDriveArticleCache_(id);
+    if (driveCached) return driveCached;
+    log_(`Article (ID:${id}) not in cache. Fetching...`);
+    try {
+      const info = getDocInfoInFolder_(config.folderId, id);
+      if (info.exists) {
+        const doc = DocumentApp.openById(id);
+        const article = { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+        storeConvertedArticle_(article, cache);
+        return article;
+      }
+    } catch (err) {
+      log_(`Error fetching article ${id}: ${err.message}`);
+    }
+    return null;
+  }).filter(Boolean);
+
+  return { ids: allIds, titles, article_cache: articleCache, tags };
+};
+
 /**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
@@ -1833,33 +1928,15 @@ export const doGet = (e) => {
   }
 
   if (!docId) {
-    const { ids: allIds, titles, listCached } = listIdsAndTitles_(cache);
-    if (!listCached) log_('List not in cache. Getting from Drive');
-
-    const tags = getTagsMap_(allIds, cache, { scanDocs: true });
-
-    const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
-    const cachedArticles = cache.getAll(targetIds);
-    const articleCache = targetIds.map((id) => {
-      if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
-      const driveCached = readDriveArticleCache_(id);
-      if (driveCached) return driveCached;
-      log_(`Article (ID:${id}) not in cache. Fetching...`);
-      try {
-        const info = getDocInfoInFolder_(config.folderId, id);
-        if (info.exists) {
-          const doc = DocumentApp.openById(id);
-          const article = { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
-          storeConvertedArticle_(article, cache);
-          return article;
-        }
-      } catch (err) {
-        log_(`Error fetching article ${id}: ${err.message}`);
-      }
-      return null;
-    }).filter(Boolean);
-
-    return json_({ ids: allIds, titles, article_cache: articleCache, tags });
+    // The assembled list is served from its persisted copy
+    // while the snapshot index still matches the state it was
+    // built from; assembling it here is the fallback, and it
+    // re-stores the copy for the next request.
+    const persisted = readValidListPayload_();
+    if (persisted) return json_(persisted);
+    const payload = assembleListPayload_(cache, config);
+    storeListPayload_(payload);
+    return json_(payload);
   }
 
   // Membership first: both caches below are keyed by document id alone,
