@@ -1,6 +1,7 @@
 {
   "scripts": {
     "test": "vitest run --coverage",
+    "test:oracle": "vitest run --config vitest.oracle.config.mjs",
     "build": "node build.js",
     "deploy": "npm run build && clasp push --force"
   },
