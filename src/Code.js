@@ -933,6 +933,15 @@ export const storeConvertedArticle_ = (article, cache) => {
   }
 };
 
+// Convert only after the caller has resolved an article in the folder
+// and exhausted its caches. Authorization and lookup stay with the caller.
+const convertAndStoreArticle_ = (id, title, cache) => {
+  const doc = DocumentApp.openById(id);
+  const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
+  storeConvertedArticle_(article, cache);
+  return article;
+};
+
 /**
  * Remove snapshot files whose source Doc is no longer in the
  * article folder (deleted or moved away), so the cache folder
@@ -1481,10 +1490,7 @@ const getJapaneseArticle_ = (docId, info, cache) => {
     warmArticleCache_(cache, docId, driveCached);
     return driveCached;
   }
-  const doc = DocumentApp.openById(docId);
-  const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
-  storeConvertedArticle_(article, cache);
-  return article;
+  return convertAndStoreArticle_(docId, info.title, cache);
 };
 
 /**
@@ -1926,10 +1932,7 @@ export const assembleListPayload_ = (cache, config) => {
     try {
       const info = getDocInfoInFolder_(config.folderId, id);
       if (info.exists) {
-        const doc = DocumentApp.openById(id);
-        const article = { id, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
-        storeConvertedArticle_(article, cache);
-        return article;
+        return convertAndStoreArticle_(id, info.title, cache);
       }
     } catch (err) {
       log_(`Error fetching article ${id}: ${err.message}`);
@@ -2148,10 +2151,7 @@ export const doGet = (e) => {
   }
 
   log_(`Document (ID:${docId}) not in cache. Generating...`);
-  const doc = DocumentApp.openById(docId);
-  const article = { id: docId, title: info.title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
-  storeConvertedArticle_(article, cache);
-  return json_(article);
+  return json_(convertAndStoreArticle_(docId, info.title, cache));
 };
 
 /** -----------------------------

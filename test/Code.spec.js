@@ -416,9 +416,11 @@ describe('Code.js', () => {
       Code.doGet(e);
 
       expect(mockDriveApp.getFolderById).toHaveBeenCalledWith(TEST_FOLDER_ID);
-      expect(mockCache.put).toHaveBeenCalledWith('id1', expect.stringContaining('"title":"Doc 1"'), Code.CACHE_TTL);
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"titles":{"id1":"Doc 1"}'));
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"article_cache":[{"id":"id1"'));
+      const article = { id: 'id1', title: 'Doc 1', markdown: '\n', tags: [] };
+      expect(mockCache.put).toHaveBeenCalledWith('id1', JSON.stringify(article), Code.CACHE_TTL);
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: ['id1'], titles: { id1: 'Doc 1' }, article_cache: [article], tags: { id1: [] },
+      }));
     });
 
     it('should return only ids and titles for o=titles from cache, without article bodies', () => {
@@ -697,8 +699,11 @@ describe('Code.js', () => {
       const e = { parameter: { id: fileId } };
       Code.doGet(e);
 
-      expect(mockCache.put).toHaveBeenCalledWith(fileId, expect.stringContaining('"title":"Valid Doc"'), Code.CACHE_TTL);
-      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(expect.stringContaining('"title":"Valid Doc"'));
+      const payload = JSON.stringify({ id: fileId, title: 'Valid Doc', markdown: '\n', tags: [] });
+      expect(mockDocumentApp.openById).toHaveBeenCalledTimes(1);
+      expect(mockDocumentApp.openById).toHaveBeenCalledWith(fileId);
+      expect(mockCache.put).toHaveBeenCalledWith(fileId, payload, Code.CACHE_TTL);
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(payload);
     });
   });
 
@@ -4707,6 +4712,10 @@ describe('Music markers', () => {
         // re-read after an in-place write, so this asserts the
         // stored state itself).
         Code.doGet({ parameter: { id: 'doc-x', lang: 'en' } });
+
+        const japanese = JSON.stringify({ id: 'doc-x', title: '題名', markdown: '本文です\n\nhttps://example.com/new\n\n終わりです\n', tags: [] });
+        expect(mockCache.put).toHaveBeenCalledWith('doc-x', japanese, Code.CACHE_TTL);
+        expect(mockContentService.createTextOutput).toHaveBeenCalledWith(japanese);
 
         const en = JSON.parse(stored.get('doc-x.en.json').content);
         expect(en.markdown).toBe('[en]本文です\n\nhttps://example.com/new\n\n[en]終わりです\n');
