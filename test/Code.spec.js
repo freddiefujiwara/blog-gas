@@ -585,7 +585,10 @@ describe('Code.js', () => {
     });
 
     it('should handle article fetch errors and continue', () => {
-      mockCache.get.mockReturnValue(JSON.stringify(['id1', 'id2']));
+      mockCache.get.mockImplementation((key) => ({
+        '0': JSON.stringify(['id1', 'id2']),
+        titles: JSON.stringify({ id1: 'Doc id1', id2: 'Doc id2' }),
+      })[key] ?? null);
       mockCache.getAll.mockReturnValue({}); // Miss both
 
       // Mock both to exist in folder
