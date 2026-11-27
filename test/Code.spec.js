@@ -370,9 +370,12 @@ describe('Code.js', () => {
       }));
     });
 
-    it('should fetch list and articles from Drive/Docs on cache miss, storing converted articles for the next read', () => {
+    it.each([
+      ['a missing', {}],
+      ['a malformed', { id1: '{not json' }],
+    ])('converts and stores a list article with %s cache entry and no snapshot', (_case, cachedArticles) => {
       mockCache.get.mockReturnValue(null);
-      mockCache.getAll.mockReturnValue({});
+      mockCache.getAll.mockReturnValue(cachedArticles);
 
       const mockFiles = [
         { getId: () => 'id1', getName: () => 'Doc 1' },
@@ -5197,6 +5200,26 @@ describe('List payload persistence', () => {
     // No snapshot exists, so assembly could never produce the
     // article body below; equality proves the persisted path.
     expect(callList()).toEqual(PAYLOAD);
+  });
+
+  it('recovers a malformed cached article from Drive without reloading its valid neighbor', () => {
+    const neighbor = { id: 'id-b', title: '2026-01-02 B', markdown: 'Cached MD', tags: [] };
+    putFile('index.json', {
+      ...INDEX,
+      'id-b': { sourceModified: MODIFIED, title: neighbor.title, tags: [] },
+    });
+    putFile('id-a.json', { ...ARTICLE, sourceModified: MODIFIED });
+    mockCache.getAll.mockReturnValue({ 'id-a': '{not json', 'id-b': JSON.stringify(neighbor) });
+
+    expect(callList()).toEqual({
+      ids: ['id-b', 'id-a'],
+      titles: { 'id-b': neighbor.title, 'id-a': ARTICLE.title },
+      article_cache: [neighbor, ARTICLE],
+      tags: { 'id-b': [], 'id-a': ARTICLE.tags },
+    });
+    expect(cacheFolder.getFilesByName).toHaveBeenCalledWith('id-a.json');
+    expect(cacheFolder.getFilesByName).not.toHaveBeenCalledWith('id-b.json');
+    expect(mockDocumentApp.openById).not.toHaveBeenCalled();
   });
 
   it('assembles on a miss, stores the payload, then serves the stored copy', () => {
