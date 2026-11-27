@@ -1940,12 +1940,148 @@ export const assembleListPayload_ = (cache, config) => {
   return { ids: allIds, titles, article_cache: articleCache, tags };
 };
 
+/** -----------------------------
+ *  Authentication (only where enabled)
+ *  -----------------------------
+ *  Same scheme as the other apps: the frontend signs in with
+ *  Google, sends the ID token here, and exchanges it for a 30-day
+ *  session token; later reads carry that token. Verification is
+ *  Google's tokeninfo endpoint plus two script properties:
+ *    AVAILABLE_GMAILS: comma-separated emails allowed to read
+ *    GOOGLE_OAUTH_CLIENT_ID: OAuth client ID the token must target
+ *  The gate is active only when AVAILABLE_GMAILS is set. The
+ *  staging project sets it; production leaves it unset and every
+ *  read stays public, exactly as before.
+ */
+export const AUTH_SESSIONS_PROPERTY = 'OWNER_SESSIONS_JSON';
+export const AUTH_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+export const authRequired_ = () => scriptProperty_('AVAILABLE_GMAILS').trim() !== '';
+
+export const allowedEmails_ = () => scriptProperty_('AVAILABLE_GMAILS')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
+
+// Verifies a Google ID token and returns its email. Throws on any
+// failed check; callers turn that into a plain "unauthorized".
+export const verifyGoogleIdToken_ = (idToken) => {
+  if (!idToken) throw new Error('missing id token');
+  const clientId = scriptProperty_('GOOGLE_OAUTH_CLIENT_ID');
+  if (!clientId) throw new Error('missing GOOGLE_OAUTH_CLIENT_ID');
+  const response = UrlFetchApp.fetch(
+    `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+    { muteHttpExceptions: true },
+  );
+  if (response.getResponseCode() !== 200) throw new Error('token verification failed');
+  const payload = JSON.parse(response.getContentText());
+  if (payload.iss !== 'accounts.google.com' && payload.iss !== 'https://accounts.google.com') {
+    throw new Error('invalid iss');
+  }
+  if (payload.aud !== clientId) throw new Error('invalid aud');
+  const expSeconds = Number(payload.exp || 0);
+  if (!Number.isFinite(expSeconds) || expSeconds * 1000 <= Date.now()) {
+    throw new Error('token expired');
+  }
+  if (payload.email_verified !== true && payload.email_verified !== 'true') {
+    throw new Error('email not verified');
+  }
+  const email = String(payload.email || '').toLowerCase();
+  if (!email) throw new Error('missing email');
+  if (!allowedEmails_().includes(email)) throw new Error('forbidden email');
+  return email;
+};
+
+// Sessions live in one script property as { token: {email, exp} }.
+// A handful of devices for a single reader stays far below the
+// per-property size limit; expired entries are pruned on issue.
+export const readSessions_ = () => {
+  try {
+    const parsed = JSON.parse(scriptProperty_(AUTH_SESSIONS_PROPERTY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    return {};
+  }
+};
+
+const writeSessions_ = (sessions) => {
+  PropertiesService.getScriptProperties()
+    .setProperty(AUTH_SESSIONS_PROPERTY, JSON.stringify(sessions));
+};
+
+export const issueSession_ = (email) => {
+  const now = Date.now();
+  const sessions = readSessions_();
+  Object.keys(sessions).forEach((token) => {
+    if (!sessions[token] || sessions[token].exp <= now) delete sessions[token];
+  });
+  const token = md5Hex_(`${email}:${now}:${Math.random()}`)
+    + md5Hex_(`${Math.random()}:${email}:${now}`);
+  sessions[token] = { email, exp: now + AUTH_SESSION_TTL_MS };
+  writeSessions_(sessions);
+  return token;
+};
+
+export const validateSession_ = (token) => {
+  if (!token) return null;
+  const entry = readSessions_()[token];
+  if (!entry || typeof entry.exp !== 'number' || entry.exp <= Date.now()) return null;
+  return entry.email || null;
+};
+
+export const revokeSession_ = (token) => {
+  if (!token) return;
+  const sessions = readSessions_();
+  if (sessions[token]) {
+    delete sessions[token];
+    writeSessions_(sessions);
+  }
+};
+
+// A read is authorized when the gate is off (production), when it
+// carries a live session token, or when it carries a verifiable
+// Google ID token (the frontend's first call after sign-in).
+export const isAuthorizedRead_ = (params) => {
+  if (!authRequired_()) return true;
+  if (validateSession_(params.session_token)) return true;
+  if (params.id_token) {
+    try {
+      verifyGoogleIdToken_(params.id_token);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+  return false;
+};
+
+export const exchangeSessionResponse_ = (params) => {
+  try {
+    const email = verifyGoogleIdToken_(params.id_token);
+    const token = issueSession_(email);
+    return { session_token: token, email, expires_at: Date.now() + AUTH_SESSION_TTL_MS };
+  } catch (e) {
+    return { error: 'unauthorized' };
+  }
+};
+
+export const revokeSessionResponse_ = (params) => {
+  revokeSession_(params.session_token);
+  return { revoked: true };
+};
+
 /**
  * [Web API]
  * Return cache if exists, otherwise generate on the fly
  */
 export const doGet = (e) => {
-  const { id: docId, o: output, lang: langParam } = (e && e.parameter) || {};
+  const params = (e && e.parameter) || {};
+  // Sign-in actions run before the read gate: exchanging a Google
+  // ID token is how a session is created in the first place.
+  if (params.action === 'exchange_session') return json_(exchangeSessionResponse_(params));
+  if (params.action === 'revoke_session') return json_(revokeSessionResponse_(params));
+  if (!isAuthorizedRead_(params)) return jsonError_('unauthorized');
+  const { id: docId, o: output, lang: langParam } = params;
   if (output === 'rss') return generateRSSResponse_();
   if (output === 'translation-status') return json_(translationStatusResponse_());
   // Only the exact values en/zh select a translation; no lang,
