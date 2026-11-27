@@ -1925,7 +1925,13 @@ export const assembleListPayload_ = (cache, config) => {
   const targetIds = allIds.slice(0, PRE_CACHE_LIMIT);
   const cachedArticles = cache.getAll(targetIds);
   const articleCache = targetIds.map((id) => {
-    if (cachedArticles[id]) return JSON.parse(cachedArticles[id]);
+    if (cachedArticles[id]) {
+      try {
+        return JSON.parse(cachedArticles[id]);
+      } catch (e) {
+        log_(`Article (ID:${id}) has invalid cached JSON. Falling back...`);
+      }
+    }
     const driveCached = readDriveArticleCache_(id);
     if (driveCached) return driveCached;
     log_(`Article (ID:${id}) not in cache. Fetching...`);
