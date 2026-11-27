@@ -805,6 +805,47 @@ describe('Code.js', () => {
       expect(viaIndex.titles).toEqual(viaScan.titles);
     });
 
+    it.each([
+      ['invalid ID JSON', '{bad', JSON.stringify(SORTED_TITLES)],
+      ['non-array IDs', '{}', JSON.stringify(SORTED_TITLES)],
+      ['invalid title JSON', JSON.stringify(SORTED_IDS), '{bad'],
+      ['array of titles', JSON.stringify(SORTED_IDS), '[]'],
+      ['mismatched IDs and titles', JSON.stringify(SORTED_IDS), JSON.stringify({ 'id-other': 'Other' })],
+    ])('serves o=titles from the index and re-warms both entries after %s', (_, ids, titles) => {
+      stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
+      stored.set('tags.json', makeFile('tags.json', JSON.stringify({ 'id-new': [], 'id-mid': [], 'id-old': [] })));
+      mockCache.get.mockImplementation((key) => ({ '0': ids, titles })[key] ?? null);
+      mockContentService.createTextOutput.mockReturnValue({ setMimeType: vi.fn().mockReturnThis() });
+
+      Code.doGet({ parameter: { o: 'titles' } });
+
+      expect(mockContentService.createTextOutput).toHaveBeenCalledWith(JSON.stringify({
+        ids: SORTED_IDS, titles: SORTED_TITLES, tags: { 'id-new': [], 'id-mid': [], 'id-old': [] },
+      }));
+      expect(mockCache.put).toHaveBeenCalledWith('0', JSON.stringify(SORTED_IDS), Code.CACHE_TTL);
+      expect(mockCache.put).toHaveBeenCalledWith('titles', JSON.stringify(SORTED_TITLES), Code.CACHE_TTL);
+      expect(folderScan).not.toHaveBeenCalled();
+    });
+
+    it('scans the folder if the cache pair and the Drive index are unusable', () => {
+      mockCache.get.mockImplementation((key) => ({ '0': '{bad', titles: '{}' })[key] ?? null);
+      expect(Code.listIdsAndTitles_(mockCache)).toEqual({
+        ids: SORTED_IDS, titles: SORTED_TITLES, listCached: false,
+      });
+      expect(folderScan).toHaveBeenCalledOnce();
+    });
+
+    it('returns a valid cache pair without reading Drive', () => {
+      mockCache.get.mockImplementation((key) => ({
+        '0': JSON.stringify(SORTED_IDS), titles: JSON.stringify(SORTED_TITLES),
+      })[key] ?? null);
+      expect(Code.listIdsAndTitles_(mockCache)).toEqual({
+        ids: SORTED_IDS, titles: SORTED_TITLES, listCached: true,
+      });
+      expect(cacheFolder.getFilesByName).not.toHaveBeenCalled();
+      expect(folderScan).not.toHaveBeenCalled();
+    });
+
     it('serves o=titles from the index on a cache miss, tags included, without scanning the folder', () => {
       stored.set('index.json', makeFile('index.json', JSON.stringify(INDEX)));
       stored.set('tags.json', makeFile('tags.json', JSON.stringify({ 'id-new': ['技術'], 'id-mid': [], 'id-old': [] })));
