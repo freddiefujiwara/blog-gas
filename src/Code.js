@@ -1833,8 +1833,21 @@ export const listFromSnapshotIndex_ = () => {
 export const listIdsAndTitles_ = (cache) => {
   const cachedList = cache.get('0');
   const cachedTitles = cache.get('titles');
+  let listCached = Boolean(cachedList);
   if (cachedList && cachedTitles) {
-    return { ids: JSON.parse(cachedList), titles: JSON.parse(cachedTitles), listCached: true };
+    try {
+      const ids = JSON.parse(cachedList);
+      const titles = JSON.parse(cachedTitles);
+      // These entries describe one catalog. Do not mix a usable half
+      // with the other half if it is malformed or out of sync.
+      if (Array.isArray(ids) && titles && typeof titles === 'object' && !Array.isArray(titles)
+        && Object.keys(titles).length === ids.length && new Set(ids).size === ids.length
+        && ids.every((id) => typeof id === 'string' && id.length > 0
+          && Object.prototype.hasOwnProperty.call(titles, id) && typeof titles[id] === 'string')) {
+        return { ids, titles, listCached: true };
+      }
+    } catch (e) { /* read the catalog from Drive instead */ }
+    listCached = false;
   }
   const fromIndex = listFromSnapshotIndex_();
   if (fromIndex) {
@@ -1846,10 +1859,10 @@ export const listIdsAndTitles_ = (cache) => {
         cache.put('titles', titlesPayload, CACHE_TTL);
       }
     } catch (e) { /* serving the list matters more than re-warming */ }
-    return { ...fromIndex, listCached: Boolean(cachedList) };
+    return { ...fromIndex, listCached };
   }
   const docs = listDocsSortedByTitle_(getConfig_().folderId);
-  return { ids: docs.map((d) => d.id), titles: titlesById_(docs), listCached: Boolean(cachedList) };
+  return { ids: docs.map((d) => d.id), titles: titlesById_(docs), listCached };
 };
 
 /** -----------------------------
