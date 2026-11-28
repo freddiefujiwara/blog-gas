@@ -127,22 +127,85 @@ describe('authentication gate', () => {
     expect(Code.validateSession_(token2)).toBeNull();
   });
 
-  it('authorizes a read carrying the share token when SHARE_TOKEN is set', () => {
+  it('authorizes a read carrying the share token while it is unexpired', () => {
     store.SHARE_TOKEN = 'a-long-random-share-token';
+    store.SHARE_TOKEN_EXPIRES_AT = String(Date.now() + 60000);
     expect(Code.validateShareToken_('a-long-random-share-token')).toBe(true);
     expect(Code.isAuthorizedRead_({ share_token: 'a-long-random-share-token' })).toBe(true);
   });
 
   it('rejects a wrong or empty share token', () => {
     store.SHARE_TOKEN = 'a-long-random-share-token';
+    store.SHARE_TOKEN_EXPIRES_AT = String(Date.now() + 60000);
     expect(Code.validateShareToken_('some-other-token')).toBe(false);
     expect(Code.validateShareToken_('')).toBe(false);
     expect(Code.isAuthorizedRead_({ share_token: 'some-other-token' })).toBe(false);
   });
 
+  it('rejects an expired share token, and one with no recorded expiry', () => {
+    store.SHARE_TOKEN = 'a-long-random-share-token';
+    store.SHARE_TOKEN_EXPIRES_AT = String(Date.now() - 1);
+    expect(Code.validateShareToken_('a-long-random-share-token')).toBe(false);
+    delete store.SHARE_TOKEN_EXPIRES_AT;
+    expect(Code.validateShareToken_('a-long-random-share-token')).toBe(false);
+  });
+
   it('grants no share access when SHARE_TOKEN is unset', () => {
     expect(Code.validateShareToken_('a-long-random-share-token')).toBe(false);
     expect(Code.isAuthorizedRead_({ share_token: 'a-long-random-share-token' })).toBe(false);
+  });
+
+  it('issue_share requires a live owner session', () => {
+    expect(Code.issueShareResponse_({})).toEqual({ error: 'unauthorized' });
+    expect(Code.issueShareResponse_({ session_token: 'nope' })).toEqual({ error: 'unauthorized' });
+    expect(store.SHARE_TOKEN).toBeUndefined();
+  });
+
+  it('a signed-in owner issues a share token that authorizes reads for 30 days', () => {
+    mockUrlFetchApp.fetch.mockReturnValue(tokenInfoOk());
+    const { session_token: session } = Code.exchangeSessionResponse_({ id_token: 'tok' });
+    const before = Date.now();
+    const res = Code.issueShareResponse_({ session_token: session });
+    expect(res.error).toBeUndefined();
+    expect(typeof res.share_token).toBe('string');
+    expect(res.share_token.length).toBeGreaterThan(0);
+    expect(res.expires_at).toBeGreaterThanOrEqual(before + Code.SHARE_TOKEN_TTL_MS);
+    expect(res.expires_at).toBeLessThanOrEqual(Date.now() + Code.SHARE_TOKEN_TTL_MS);
+    expect(store.SHARE_TOKEN).toBe(res.share_token);
+    expect(Code.isAuthorizedRead_({ share_token: res.share_token })).toBe(true);
+  });
+
+  it('reissuing replaces the token and revokes the previous link', () => {
+    // The shared digest mock returns constant bytes, which would
+    // mint identical tokens; vary it so each issue differs, as the
+    // real MD5 of a random input does.
+    let digestByte = 0;
+    global.Utilities.computeDigest.mockImplementation(() => {
+      digestByte += 1;
+      return [digestByte, 15, 255, -1];
+    });
+    mockUrlFetchApp.fetch.mockReturnValue(tokenInfoOk());
+    const { session_token: session } = Code.exchangeSessionResponse_({ id_token: 'tok' });
+    const first = Code.issueShareResponse_({ session_token: session });
+    const second = Code.issueShareResponse_({ session_token: session });
+    expect(second.share_token).not.toBe(first.share_token);
+    expect(Code.validateShareToken_(first.share_token)).toBe(false);
+    expect(Code.validateShareToken_(second.share_token)).toBe(true);
+  });
+
+  it('a share token cannot issue its own successor', () => {
+    // Vary the digest mock (see the reissue test): with constant
+    // bytes the session and share tokens would be the same string.
+    let digestByte = 100;
+    global.Utilities.computeDigest.mockImplementation(() => {
+      digestByte += 1;
+      return [digestByte, 15, 255, -1];
+    });
+    mockUrlFetchApp.fetch.mockReturnValue(tokenInfoOk());
+    const { session_token: session } = Code.exchangeSessionResponse_({ id_token: 'tok' });
+    const { share_token: share } = Code.issueShareResponse_({ session_token: session });
+    expect(Code.issueShareResponse_({ share_token: share })).toEqual({ error: 'unauthorized' });
+    expect(Code.issueShareResponse_({ session_token: share })).toEqual({ error: 'unauthorized' });
   });
 
   it('doGet answers unauthorized before any read when the gate is on', () => {
