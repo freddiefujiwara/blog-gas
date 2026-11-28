@@ -136,6 +136,21 @@ describe('Code.js', () => {
       expect(global.console.log).toHaveBeenCalledWith("Logs cleared");
     });
 
+    it('should log a timing line for each stage and a finish line', () => {
+      const mockIterator = { hasNext: () => false };
+      const mockFolder = { getFilesByType: vi.fn().mockReturnValue(mockIterator) };
+      mockDriveApp.getFolderById.mockReturnValue(mockFolder);
+
+      Code.preCacheAll();
+
+      const logged = global.console.log.mock.calls.map((args) => String(args[0]));
+      for (const label of ['list/titles', 'articles', 'cleanup', 'tags', 'ogp dispatch', 'translation status']) {
+        expect(logged.some((line) => line.startsWith(`Stage ${label}`))).toBe(true);
+      }
+      expect(logged.some((line) => line.includes('articles (0 checked, 0 reconverted)'))).toBe(true);
+      expect(logged.some((line) => /^preCacheAll finished: \d+ ms$/.test(line))).toBe(true);
+    });
+
     it('should save the list and the first PRE_CACHE_LIMIT documents', () => {
       const mockFiles = [];
       for (let i = 0; i < Code.PRE_CACHE_LIMIT + 5; i++) {
