@@ -112,6 +112,22 @@ export const preCacheAll = () => {
   const backfillLimit = Number.parseInt(scriptProperty_('TRANSLATE_BACKFILL_LIMIT'), 10);
   const backfillIds = backfillLimit > 0 ? new Set(allIds.slice(0, backfillLimit)) : null;
 
+  // Translation stops for the rest of the day once the
+  // LanguageApp quota is reported exhausted (see the quota
+  // guard further down); this flag lets the pass skip the
+  // attempt entirely instead of failing once per article and
+  // language for the rest of the run.
+  let quotaExhausted = translateQuotaBlocked_();
+
+  // The TRANSLATE_PER_RUN_LIMIT script property caps how many
+  // articles one run may freshly translate, so a burst of new
+  // or changed articles spreads over several runs instead of
+  // burning the day's quota in one go. Unset, empty or invalid
+  // means no cap. Splice carry-overs spend no quota and are
+  // not counted.
+  const perRunLimit = Number.parseInt(scriptProperty_('TRANSLATE_PER_RUN_LIMIT'), 10);
+  let translatedThisRun = 0;
+
   // Freshness is decided from the snapshot index (one small file)
   // instead of downloading every snapshot just to compare stamps:
   // an entry whose stamp still matches the Doc's modified time is
@@ -155,11 +171,19 @@ export const preCacheAll = () => {
   // entirely.
   const ensureLangSnapshots_ = (id, article, position) => {
     if (!article) return;
+    if (quotaExhausted) return;
     if (backfillIds && !backfillIds.has(id)) return;
+    let counted = false;
     const langs = position % 2 === 0 ? ARTICLE_LANGS : [...ARTICLE_LANGS].reverse();
     for (const lang of langs) {
+      if (quotaExhausted) return;
       if (langEntryFresh_(lang, id)) continue;
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
+      if (!counted) {
+        if (perRunLimit > 0 && translatedThisRun >= perRunLimit) return;
+        counted = true;
+        translatedThisRun += 1;
+      }
       // The translation itself stops at the deadline (hot-set
       // articles, which may start late, get one extra budget
       // window): one huge article aborts and keeps its previous
@@ -174,6 +198,7 @@ export const preCacheAll = () => {
         recordLangTitle_(lang, id, entry);
         console.log(`Translated: ${translated.title} (${lang})`);
       } catch (e) {
+        if (isTranslateQuotaStop_(e)) quotaExhausted = true;
         console.error(`Failed to translate ID:${id} (${lang}): ${e.message}`);
       }
     }
@@ -1135,8 +1160,50 @@ export const translatedTitlesFor_ = (ids, titles, lang) => {
   return merged;
 };
 
+/** -----------------------------
+ *  Translation quota guard
+ *  -----------------------------
+ *  The LanguageApp daily quota is account-wide and resets at
+ *  midnight Pacific Time. Once a call reports it exhausted,
+ *  every further call that day is wasted work — and bursts of
+ *  retries are how the quota gets burned in the first place —
+ *  so the Pacific date of the first exhaustion report is kept
+ *  in a script property and translation stops until the date
+ *  rolls over. The gate sits in translateArticle_, the one
+ *  entry every translation (batch or on-demand) goes through;
+ *  the marking sits in translateCall_, the one place that
+ *  talks to LanguageApp.
+ */
+export const TRANSLATE_QUOTA_DATE_PROPERTY = 'TRANSLATE_QUOTA_EXHAUSTED_DATE';
+
+export const translateQuotaDay_ = () => Utilities.formatDate(new Date(), 'America/Los_Angeles', 'yyyy-MM-dd');
+
+export const isTranslateQuotaError_ = (e) => /too many times/i.test(String((e && e.message) || e || ''));
+
+export const translateQuotaBlocked_ = () => scriptProperty_(TRANSLATE_QUOTA_DATE_PROPERTY) === translateQuotaDay_();
+
+export const markTranslateQuotaExhausted_ = () => {
+  try {
+    PropertiesService.getScriptProperties()
+      .setProperty(TRANSLATE_QUOTA_DATE_PROPERTY, translateQuotaDay_());
+  } catch (e) { /* best-effort: the in-run guards still stop this run */ }
+};
+
+const QUOTA_BLOCKED_MESSAGE = 'LanguageApp daily quota already exhausted today; translation skipped';
+
+// A failure that means "stop translating", whether it is the
+// quota error itself or the gate's refusal after it tripped.
+export const isTranslateQuotaStop_ = (e) => isTranslateQuotaError_(e)
+  || String((e && e.message) || e || '') === QUOTA_BLOCKED_MESSAGE;
+
 const translateCall_ = (text, target) => {
-  const result = LanguageApp.translate(text, 'ja', target);
+  let result;
+  try {
+    result = LanguageApp.translate(text, 'ja', target);
+  } catch (e) {
+    if (isTranslateQuotaError_(e)) markTranslateQuotaExhausted_();
+    throw e;
+  }
   if (typeof result !== 'string' || (text.trim() && !result.trim())) {
     throw new Error('LanguageApp returned an empty translation');
   }
@@ -1333,6 +1400,7 @@ export const translateMarkdown_ = (markdown, target, deadline) => {
 };
 
 export const translateArticle_ = (article, lang, deadline) => {
+  if (translateQuotaBlocked_()) throw new Error(QUOTA_BLOCKED_MESSAGE);
   const target = LANG_TARGETS[lang];
   return {
     id: article.id,

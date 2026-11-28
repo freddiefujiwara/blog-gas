@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as Code from '../src/Code.js';
 
 // Mock GAS Globals
@@ -3107,6 +3107,141 @@ describe('Code.js', () => {
 
       expect(Code.refreshArticleSnapshot('missing')).toBeNull();
       expect(stored.size).toBe(0);
+    });
+  });
+
+  describe('Translation quota guard', () => {
+    const MODIFIED = 1700000000000;
+    const stored = new Map();
+    const makeFile = (name, content) => ({
+      name,
+      content,
+      getName: () => name,
+      getBlob: () => ({ getDataAsString: () => content }),
+      setContent: vi.fn(function (c) { this.content = c; }),
+      setTrashed: vi.fn(),
+    });
+    const cacheFolder = {
+      getFilesByName: vi.fn((name) => {
+        const f = stored.get(name);
+        return { hasNext: () => !!f, next: () => f };
+      }),
+      createFile: vi.fn((name, content) => {
+        const f = makeFile(name, content);
+        stored.set(name, f);
+        return f;
+      }),
+      getFiles: vi.fn(() => {
+        const files = [...stored.values()];
+        let i = 0;
+        return { hasNext: () => i < files.length, next: () => files[i++] };
+      }),
+    };
+    const articleFolder = (files) => {
+      let i = 0;
+      return {
+        getFilesByType: vi.fn(() => ({ hasNext: () => i < files.length, next: () => files[i++] })),
+        getFoldersByName: vi.fn(() => ({ hasNext: () => true, next: () => cacheFolder })),
+      };
+    };
+    const docFile = (id, name) => ({
+      getId: () => id,
+      getName: () => name,
+      getLastUpdated: () => new Date(MODIFIED),
+      getMimeType: () => mockMimeType.GOOGLE_DOCS,
+      getParents: () => ({ hasNext: () => true, next: () => ({ getId: () => TEST_FOLDER_ID }) }),
+    });
+    // A deterministic stand-in translator: wraps each line in a
+    // target-language tag, like the translation suites above.
+    const tagTranslate = (text, source, target) => text.split('\n').map((line) => (line ? `[${target}]${line}` : line)).join('\n');
+    // Articles are processed newest first (title order), so
+    // doc-new is always the first one a run reaches.
+    const seedTwoArticles = () => {
+      stored.set('doc-new.json', makeFile('doc-new.json', JSON.stringify({ id: 'doc-new', title: '2026-01-02 New Title', markdown: 'New body', tags: [], sourceModified: MODIFIED })));
+      stored.set('doc-old.json', makeFile('doc-old.json', JSON.stringify({ id: 'doc-old', title: '2026-01-01 Old Title', markdown: 'Old body', tags: [], sourceModified: MODIFIED })));
+      mockDriveApp.getFolderById.mockReturnValue(articleFolder([docFile('doc-new', '2026-01-02 New Title'), docFile('doc-old', '2026-01-01 Old Title')]));
+      mockDriveApp.getFileById.mockImplementation((id) => docFile(id, id === 'doc-new' ? '2026-01-02 New Title' : '2026-01-01 Old Title'));
+    };
+
+    beforeEach(() => {
+      stored.clear();
+      cacheFolder.getFilesByName.mockClear();
+      cacheFolder.createFile.mockClear();
+      mockCache.get.mockReturnValue(null);
+      mockCache.getAll.mockReturnValue({});
+      mockContentService.createTextOutput.mockReturnValue({ setMimeType: vi.fn().mockReturnThis() });
+      mockLanguageApp.translate.mockImplementation(tagTranslate);
+      mockUtilities.formatDate.mockReturnValue('2026-11-29');
+    });
+
+    afterEach(() => {
+      delete TEST_CONFIG.TRANSLATE_QUOTA_EXHAUSTED_DATE;
+      delete TEST_CONFIG.TRANSLATE_PER_RUN_LIMIT;
+      mockUtilities.formatDate.mockReset();
+    });
+
+    it('recognises the LanguageApp daily-quota error', () => {
+      expect(Code.isTranslateQuotaError_(new Error('Service invoked too many times for one day: translate'))).toBe(true);
+      expect(Code.isTranslateQuotaError_(new Error('Translation deadline exceeded'))).toBe(false);
+      expect(Code.isTranslateQuotaStop_(new Error('Service invoked too many times for one day: translate'))).toBe(true);
+    });
+
+    it('translateText_ records the exhaustion date when the quota error surfaces', () => {
+      mockLanguageApp.translate.mockImplementation(() => { throw new Error('Service invoked too many times for one day: translate'); });
+      expect(() => Code.translateText_('文章です', 'en')).toThrow('too many times');
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('TRANSLATE_QUOTA_EXHAUSTED_DATE', '2026-11-29');
+    });
+
+    it('translateArticle_ refuses without calling LanguageApp while the quota is blocked for today', () => {
+      TEST_CONFIG.TRANSLATE_QUOTA_EXHAUSTED_DATE = '2026-11-29';
+      expect(Code.translateQuotaBlocked_()).toBe(true);
+      expect(() => Code.translateArticle_({ id: 'doc-a', title: 'A Title', markdown: 'A body', tags: [] }, 'en')).toThrow('quota already exhausted');
+      expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+    });
+
+    it('translateArticle_ translates normally when the recorded exhaustion is from an earlier day', () => {
+      TEST_CONFIG.TRANSLATE_QUOTA_EXHAUSTED_DATE = '2026-11-28';
+      expect(Code.translateQuotaBlocked_()).toBe(false);
+      const out = Code.translateArticle_({ id: 'doc-a', title: 'A Title', markdown: 'A body', tags: [] }, 'en');
+      expect(out.title).toBe('[en]A Title');
+    });
+
+    it('preCacheAll translates nothing while the quota is blocked for today', () => {
+      TEST_CONFIG.TRANSLATE_QUOTA_EXHAUSTED_DATE = '2026-11-29';
+      seedTwoArticles();
+      Code.preCacheAll();
+      expect(mockLanguageApp.translate).not.toHaveBeenCalled();
+      expect(stored.has('doc-new.en.json')).toBe(false);
+      expect(stored.has('doc-old.en.json')).toBe(false);
+    });
+
+    it('preCacheAll stops translating further articles once the quota error trips', () => {
+      const attempted = [];
+      mockLanguageApp.translate.mockImplementation((text) => { attempted.push(text); throw new Error('Service invoked too many times for one day: translate'); });
+      seedTwoArticles();
+      Code.preCacheAll();
+      expect(attempted.length).toBeGreaterThan(0);
+      expect(attempted.join('\n')).not.toContain('Old Title');
+      expect(attempted.join('\n')).not.toContain('Old body');
+      expect(mockProperties.setProperty).toHaveBeenCalledWith('TRANSLATE_QUOTA_EXHAUSTED_DATE', '2026-11-29');
+      expect(stored.has('doc-old.en.json')).toBe(false);
+    });
+
+    it('preCacheAll caps fresh translations per run when TRANSLATE_PER_RUN_LIMIT is set', () => {
+      TEST_CONFIG.TRANSLATE_PER_RUN_LIMIT = '1';
+      seedTwoArticles();
+      Code.preCacheAll();
+      expect(stored.has('doc-new.en.json')).toBe(true);
+      expect(stored.has('doc-new.zh.json')).toBe(true);
+      expect(stored.has('doc-old.en.json')).toBe(false);
+      expect(stored.has('doc-old.zh.json')).toBe(false);
+    });
+
+    it('preCacheAll translates every stale article when no per-run limit is set', () => {
+      seedTwoArticles();
+      Code.preCacheAll();
+      expect(stored.has('doc-new.en.json')).toBe(true);
+      expect(stored.has('doc-old.en.json')).toBe(true);
     });
   });
 
