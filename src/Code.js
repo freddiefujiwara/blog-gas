@@ -2002,15 +2002,19 @@ export const assembleListPayload_ = (cache, config) => {
  *  staging project sets it; production leaves it unset and every
  *  read stays public, exactly as before.
  *
- *  A project may also set SHARE_TOKEN: a read carrying that exact
- *  value as its share_token parameter is authorized without a
- *  sign-in (the magic-link route, same as the other apps' share
- *  links). Whoever holds the link can read, so the token is a
- *  long random string, and replacing the property revokes every
- *  link issued with the old value. Unset means no share access.
+ *  A project may also carry a share token (the magic-link route,
+ *  same as the other apps' share links): a read carrying the
+ *  SHARE_TOKEN property's value as its share_token parameter is
+ *  authorized without a sign-in, until the SHARE_TOKEN_EXPIRES_AT
+ *  property (ms epoch) passes — 30 days from issue. Whoever holds
+ *  the link can read, so the token is a long random string. A
+ *  signed-in reader issues a fresh one from the staging page
+ *  (action=issue_share), which replaces the stored token and so
+ *  revokes every link issued before. Unset means no share access.
  */
 export const AUTH_SESSIONS_PROPERTY = 'OWNER_SESSIONS_JSON';
 export const AUTH_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+export const SHARE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export const authRequired_ = () => scriptProperty_('AVAILABLE_GMAILS').trim() !== '';
 
@@ -2097,7 +2101,24 @@ export const revokeSession_ = (token) => {
 export const validateShareToken_ = (token) => {
   if (!token) return false;
   const expected = scriptProperty_('SHARE_TOKEN');
-  return expected !== '' && token === expected;
+  if (expected === '' || token !== expected) return false;
+  const expiresAt = Number(scriptProperty_('SHARE_TOKEN_EXPIRES_AT'));
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+};
+
+// Issues the (single) share token: a fresh random value replaces
+// the stored one, so links issued before stop working, and the
+// new one lives for SHARE_TOKEN_TTL_MS. Only a live owner session
+// may issue — a share token cannot mint its own successor.
+export const issueShareResponse_ = (params) => {
+  if (!validateSession_(params.session_token)) return { error: 'unauthorized' };
+  const token = md5Hex_(`share:${Date.now()}:${Math.random()}`)
+    + md5Hex_(`${Math.random()}:share:${Date.now()}`);
+  const expiresAt = Date.now() + SHARE_TOKEN_TTL_MS;
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('SHARE_TOKEN', token);
+  props.setProperty('SHARE_TOKEN_EXPIRES_AT', String(expiresAt));
+  return { share_token: token, expires_at: expiresAt };
 };
 
 // A read is authorized when the gate is off (production), when it
@@ -2144,6 +2165,9 @@ export const doGet = (e) => {
   // ID token is how a session is created in the first place.
   if (params.action === 'exchange_session') return json_(exchangeSessionResponse_(params));
   if (params.action === 'revoke_session') return json_(revokeSessionResponse_(params));
+  // Issuing a share link is an owner action, not a read: the
+  // handler itself requires a live session before it mints one.
+  if (params.action === 'issue_share') return json_(issueShareResponse_(params));
   if (!isAuthorizedRead_(params)) return jsonError_('unauthorized');
   const { id: docId, o: output, lang: langParam } = params;
   if (output === 'rss') return generateRSSResponse_();
