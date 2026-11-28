@@ -2001,6 +2001,13 @@ export const assembleListPayload_ = (cache, config) => {
  *  The gate is active only when AVAILABLE_GMAILS is set. The
  *  staging project sets it; production leaves it unset and every
  *  read stays public, exactly as before.
+ *
+ *  A project may also set SHARE_TOKEN: a read carrying that exact
+ *  value as its share_token parameter is authorized without a
+ *  sign-in (the magic-link route, same as the other apps' share
+ *  links). Whoever holds the link can read, so the token is a
+ *  long random string, and replacing the property revokes every
+ *  link issued with the old value. Unset means no share access.
  */
 export const AUTH_SESSIONS_PROPERTY = 'OWNER_SESSIONS_JSON';
 export const AUTH_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -2087,12 +2094,20 @@ export const revokeSession_ = (token) => {
   }
 };
 
+export const validateShareToken_ = (token) => {
+  if (!token) return false;
+  const expected = scriptProperty_('SHARE_TOKEN');
+  return expected !== '' && token === expected;
+};
+
 // A read is authorized when the gate is off (production), when it
-// carries a live session token, or when it carries a verifiable
-// Google ID token (the frontend's first call after sign-in).
+// carries a live session token, when it carries the project's
+// share token, or when it carries a verifiable Google ID token
+// (the frontend's first call after sign-in).
 export const isAuthorizedRead_ = (params) => {
   if (!authRequired_()) return true;
   if (validateSession_(params.session_token)) return true;
+  if (validateShareToken_(params.share_token)) return true;
   if (params.id_token) {
     try {
       verifyGoogleIdToken_(params.id_token);

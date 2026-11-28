@@ -127,6 +127,24 @@ describe('authentication gate', () => {
     expect(Code.validateSession_(token2)).toBeNull();
   });
 
+  it('authorizes a read carrying the share token when SHARE_TOKEN is set', () => {
+    store.SHARE_TOKEN = 'a-long-random-share-token';
+    expect(Code.validateShareToken_('a-long-random-share-token')).toBe(true);
+    expect(Code.isAuthorizedRead_({ share_token: 'a-long-random-share-token' })).toBe(true);
+  });
+
+  it('rejects a wrong or empty share token', () => {
+    store.SHARE_TOKEN = 'a-long-random-share-token';
+    expect(Code.validateShareToken_('some-other-token')).toBe(false);
+    expect(Code.validateShareToken_('')).toBe(false);
+    expect(Code.isAuthorizedRead_({ share_token: 'some-other-token' })).toBe(false);
+  });
+
+  it('grants no share access when SHARE_TOKEN is unset', () => {
+    expect(Code.validateShareToken_('a-long-random-share-token')).toBe(false);
+    expect(Code.isAuthorizedRead_({ share_token: 'a-long-random-share-token' })).toBe(false);
+  });
+
   it('doGet answers unauthorized before any read when the gate is on', () => {
     Code.doGet({ parameter: { o: 'titles' } });
     expect(JSON.parse(lastOutput)).toEqual({ error: 'unauthorized' });
