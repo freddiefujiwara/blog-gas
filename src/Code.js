@@ -35,6 +35,17 @@ export const preCacheAll = () => {
   PropertiesService.getScriptProperties().deleteProperty('DEBUG_LOGS');
   console.log('Logs cleared');
 
+  // Stage timings: a run that dies at the execution limit leaves
+  // these lines behind, so the last one printed (and the totals)
+  // show where the time went.
+  const runStart = Date.now();
+  let stageStart = runStart;
+  const stageLog = (label) => {
+    const now = Date.now();
+    console.log(`Stage ${label}: ${now - stageStart} ms (total ${now - runStart} ms)`);
+    stageStart = now;
+  };
+
   const cache = CacheService.getScriptCache();
   const config = getConfig_();
   const docs = listDocsSortedByTitle_(config.folderId);
@@ -55,6 +66,7 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`Failed to save list: ${e.message}`);
   }
+  stageLog('list/titles');
 
   // Two layers are maintained here. The Drive snapshot layer is
   // the durable one: every article whose snapshot is missing or
@@ -215,6 +227,8 @@ export const preCacheAll = () => {
     snapshotIndexDirty = true;
   };
 
+  let reconvertedCount = 0;
+  let slowestConversion = null;
   let position = 0;
   for (const id of orderedIds) {
     const articlePosition = position;
@@ -254,6 +268,7 @@ export const preCacheAll = () => {
         continue;
       }
       if (!targetSet.has(id) && Date.now() > snapshotDeadline) continue;
+      const conversionStart = Date.now();
       const doc = DocumentApp.openById(id);
       const title = doc.getName();
       const article = { id, title, markdown: docBodyToMarkdown_(doc), tags: extractDocTags_(doc) };
@@ -267,6 +282,11 @@ export const preCacheAll = () => {
       rememberIndex_(id, title, article.tags);
       if (previous) spliceTranslations_(id, previous, article);
       ensureLangSnapshots_(id, article, articlePosition);
+      reconvertedCount += 1;
+      const conversionMs = Date.now() - conversionStart;
+      if (!slowestConversion || conversionMs > slowestConversion.ms) {
+        slowestConversion = { title, ms: conversionMs };
+      }
 
       const articlePayload = JSON.stringify(article);
       if (articlePayload.length < CACHE_SIZE_LIMIT) {
@@ -279,6 +299,8 @@ export const preCacheAll = () => {
       console.error(`Failed to save ID:${id}: ${e.message}`);
     }
   }
+
+  stageLog(`articles (${orderedIds.length} checked, ${reconvertedCount} reconverted${slowestConversion ? `, slowest: ${slowestConversion.title} ${slowestConversion.ms} ms` : ''})`);
 
   // Drop index entries for articles that left the folder, then
   // persist the index if anything in this run changed it.
@@ -318,6 +340,7 @@ export const preCacheAll = () => {
   }
 
   pruneOrphanSnapshots_(allIds);
+  stageLog('cleanup');
 
   // Warm the tags map (every article, not only the ones converted
   // above) so list/titles responses can serve it straight from
@@ -359,6 +382,7 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`Failed to save tags: ${e.message}`);
   }
+  stageLog('tags');
 
   // Kick the blog's shell/OGP generation when articles have been
   // published since the previous run. Fully best-effort: a failure
@@ -368,6 +392,7 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`OGP dispatch check failed: ${e.message}`);
   }
+  stageLog('ogp dispatch');
 
   // Keep the translation-status snapshot warm so the status
   // endpoint serves in seconds instead of recomputing per
@@ -377,6 +402,8 @@ export const preCacheAll = () => {
   } catch (e) {
     console.error(`Translation status refresh failed: ${e.message}`);
   }
+  stageLog('translation status');
+  console.log(`preCacheAll finished: ${Date.now() - runStart} ms`);
 
 };
 
